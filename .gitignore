@@ -2,6 +2,7 @@
 .env
 config/youtube_client_secret.json
 config/*.token.json
+github_credentials.txt
 
 # Generated assets & state
 data/*
