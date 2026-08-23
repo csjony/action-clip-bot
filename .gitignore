@@ -3,6 +3,7 @@
 config/youtube_client_secret.json
 config/*.token.json
 github_credentials.txt
+.git-access
 
 # Generated assets & state
 data/*
