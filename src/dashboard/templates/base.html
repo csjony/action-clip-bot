@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block title %}Action Clip Bot{% endblock %}</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav>
+  <a href="/" class="brand">🎬 Action Clip Bot</a>
+  <div class="nav-links">
+    <a href="/">Dashboard</a>
+    <a href="/accounts">Accounts</a>
+    <a href="/runs">Runs</a>
+    <a href="/posts">Posts</a>
+    <a href="/generate">Generate</a>
+    <a href="/usage">Usage</a>
+    <a href="/logs">Logs</a>
+  </div>
+</nav>
+<main>
+{% block content %}{% endblock %}
+</main>
+<footer>
+  <span>Action Clip Bot v0.1.0</span>
+</footer>
+<script src="/static/dash.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

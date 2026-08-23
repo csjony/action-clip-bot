@@ -1,0 +1,95 @@
+# =============================================================================
+# Action Clip Bot — global settings.
+# Values here are defaults; secrets live in .env (never committed).
+# =============================================================================
+
+project:
+  name: action-clip-bot
+  # Where generated assets + state.db live
+  data_dir: data
+
+# --- Budget guard ------------------------------------------------------------
+budget:
+  # Max USD spent on PAID video generations per calendar month.
+  # Free-tier generations are free and never counted.
+  monthly_cap_usd: 5.0
+
+# --- Video output ------------------------------------------------------------
+video:
+  target_duration_sec: 70      # ~12-13 clips at 6s each (approximating 70s for monetization)
+  min_clips: 12
+  max_clips: 13
+  clip_duration_sec: 6
+  generation:
+    fps: 16                    # Keep source generation/render fps consistent end-to-end
+    anchor_steps: 12           # Clip 0 anchor: full-quality photorealistic
+    subsequent_steps: 12       # Clips 1+: matching anchor quality — no gaming/CGI regression
+    resolution:
+      width: 832
+      height: 480              # 832x480 → Lanczos upscale to 1280x720 → final render at 1920x1080
+    negative_prompt: "cgi, 3d render, video game, anime, cartoon, sketch, painting, drawing, unreal engine, blender, smooth surfaces, low quality"
+  split_threshold_sec: 60.0    # vertical videos >= this duration are auto-split into two parts
+  # Two aspect variants are always rendered
+  render:
+    vertical: { width: 1080, height: 1920 }   # TikTok / Reels / Shorts / Threads
+    horizontal: { width: 1920, height: 1080 } # YouTube / Facebook
+  loudness_lufs: -14            # platform standard
+  outro_duration_sec: 2
+  enable_voice: false           # Set to true to enable AI text-to-speech voiceover/narration
+  sfx:
+    enable: true                # Set to true to enable scene-aware sound effects (SFX)
+    provider: "freesound"       # "freesound" or "elevenlabs"
+    default_volume: 0.5         # default volume multiplier for SFX
+  transition:
+    type: "fade"                # transition type (e.g. "fade", "circleopen", etc.)
+    duration_sec: 0.5           # crossfade overlap duration in seconds
+
+# --- Scriptwriting (LLM) ----------------------------------------------------
+llm:
+  # Provider priority. Falls back down the list on error / quota.
+  providers: [gemini, groq]
+  model:
+    gemini: gemini-3.5-flash
+    groq: llama-3.1-8b-instant
+  # Themes rotate each run to keep content varied. Pick one at random per job.
+  themes:
+    - neon_city_chase
+    - desert_gunfight
+    - cyberpunk_duel
+    - underwater_infiltration
+    - rooftop_parkour
+    - heist_getaway
+    - sword_clash
+    - snowmobile_pursuit
+    - warehouse_ambush
+    - train_top_fight
+  hashtag_pool:
+    - "#action"
+    - "#cinematic"
+    - "#shorts"
+    - "#reels"
+    - "#fyp"
+    - "#actionmovies"
+    - "#viral"
+    - "#stunts"
+
+# --- Publishing -------------------------------------------------------------
+publishing:
+  # Aggregator is primary; native APIs are fallback when its free quota is hit.
+  aggregator_priority: [upload_post, postproxy, bundle_social]
+  platforms: [youtube, facebook, instagram, threads, tiktok]
+  # Auto-prepend AI-disclosure for monetization compliance.
+  ai_disclosure_prefix: "🤖 AI-generated cinematic action. "
+  # Per-platform caption length caps (approx.)
+  caption_max:
+    youtube: 4900
+    facebook: 4900
+    instagram: 2200
+    threads: 490
+    tiktok: 2200
+
+# --- Schedule ---------------------------------------------------------------
+# (cron actually drives timing — these are documented cadence targets)
+schedule:
+  videos_per_week: 3
+  days: [mon, wed, fri]

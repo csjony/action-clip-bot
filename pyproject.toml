@@ -1,0 +1,52 @@
+[project]
+name = "action-clip-bot"
+version = "0.1.0"
+description = "AI action clip generator + multi-platform auto-publisher (budget bootstrap path)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "action-clip-bot" }]
+
+dependencies = [
+    # --- LLM / scriptwriting ---
+    "google-genai",                 # Gemini modern SDK
+    # --- TTS / captions ---
+    "edge-tts>=6.1.0",
+    "faster-whisper>=1.0.0",
+    # --- HTTP / APIs ---
+    "httpx>=0.27.0",
+    "requests>=2.32.0",
+    # --- config / utils ---
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.7.0",
+    "tenacity>=8.5.0",              # retry helpers for the fallback chain
+    # --- video probes ---
+    "ffmpeg-python>=0.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+]
+dashboard = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+    "itsdangerous>=2.1",
+]
+
+[project.scripts]
+action-clip-bot = "src.pipeline:main"
+action-clip-bot-dashboard = "src.dashboard.__main__:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

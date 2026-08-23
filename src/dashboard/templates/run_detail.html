@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Run details — Action Clip Bot{% endblock %}
+{% block content %}
+<h1>Execution Run Details</h1>
+<p class="muted" style="margin-bottom: 2rem;">Real-time event logging stream for the selected generation run sequence.</p>
+
+{% if run_state %}
+<div class="card" style="margin-bottom: 2rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem;">
+  <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+    <span class="muted">Run ID:</span>
+    <code>{{ run_id }}</code>
+    
+    {% if run_state.status == "running" %}
+      <span class="badge badge-running">🔄 Running</span>
+    {% elif run_state.status == "finished" %}
+      <span class="badge badge-ok">✅ Finished (exit {{ run_state.exit_code }})</span>
+    {% elif run_state.status == "failed" %}
+      <span class="badge badge-fail">❌ Failed{% if run_state.error %}: {{ run_state.error[:200] }}{% endif %}</span>
+    {% else %}
+      <span class="badge">{{ run_state.status }}</span>
+    {% endif %}
+
+    {% if run_state.dry_run %}
+      <span class="badge badge-dry">DRY RUN</span>
+    {% endif %}
+  </div>
+
+  {% if run_state.theme %}
+  <div>
+    <span class="badge" style="background: rgba(99, 102, 241, 0.1); color: var(--primary);">Theme: {{ run_state.theme }}</span>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+<h2>Event Execution Log Stream</h2>
+<div class="timeline" id="timeline" style="margin-bottom: 2.5rem;">
+{% if events %}
+{% for e in events %}
+<div class="event event-{{ e.kind }}" data-id="{{ e.id }}">
+  <span class="event-time">{{ fmt_ts(e.ts) }}</span>
+  <span class="event-kind badge badge-dry" style="text-transform: uppercase; font-size: 0.7rem; padding: 1px 6px;">{{ e.kind }}</span>
+  {% if e.provider %}<span class="event-provider">⚡ {{ e.provider }}</span>{% endif %}
+  {% if e.scene_index is not none %}<span class="event-scene">🎬 Clip {{ e.scene_index }}{% if e.total_scenes %}/{{ e.total_scenes }}{% endif %}</span>{% endif %}
+  {% if e.elapsed_ms %}<span class="event-elapsed">⏱️ {{ fmt_duration_ms(e.elapsed_ms) }}</span>{% endif %}
+  <span class="event-msg">{{ e.message }}</span>
+</div>
+{% endfor %}
+{% else %}
+<p class="muted" id="no-events" style="padding: 2rem; text-align: center;">Waiting for incoming events...</p>
+{% endif %}
+</div>
+
+<a href="/runs" class="btn btn-secondary">← Back to Execution Runs</a>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Live polling for in-progress runs
+(function() {
+  const runId = "{{ run_id }}";
+  let lastId = {{ events[-1].id if events else 0 }};
+  const timeline = document.getElementById('timeline');
+  const noEvents = document.getElementById('no-events');
+
+  function poll() {
+    fetch(`/api/runs/${runId}/events?after_id=${lastId}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.events && data.events.length > 0) {
+          if (noEvents) noEvents.remove();
+          data.events.forEach(e => {
+            lastId = e.id;
+            const div = document.createElement('div');
+            div.className = `event event-${e.kind}`;
+            div.dataset.id = e.id;
+            div.innerHTML = `
+              <span class="event-time">${e.ts ? e.ts.substring(0,19).replace('T', ' ') : ''}</span>
+              <span class="event-kind badge badge-dry" style="text-transform: uppercase; font-size: 0.7rem; padding: 1px 6px;">${e.kind}</span>
+              ${e.provider ? `<span class="event-provider">⚡ ${e.provider}</span>` : ''}
+              ${e.scene_index != null ? `<span class="event-scene">🎬 Clip ${e.scene_index}${e.total_scenes ? '/'+e.total_scenes : ''}</span>` : ''}
+              ${e.elapsed_ms ? `<span class="event-elapsed">⏱️ ${formatMs(e.elapsed_ms)}</span>` : ''}
+              <span class="event-msg">${e.message || ''}</span>
+            `;
+            timeline.appendChild(div);
+            div.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          });
+        }
+        // Keep polling if run is still active
+        if (data.status === 'running') {
+          setTimeout(poll, 2000);
+        }
+      })
+      .catch(() => setTimeout(poll, 5000));
+  }
+
+  function formatMs(ms) {
+    const s = ms / 1000;
+    if (s < 60) return s.toFixed(1) + 's';
+    return Math.floor(s/60) + 'm ' + Math.floor(s%60) + 's';
+  }
+
+  // Auto-poll if we think the run might still be active
+  const statusBadge = document.querySelector('.badge-running');
+  if (statusBadge) {
+    poll();
+  }
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,20 @@
+[Script Info]
+; TikTok-style bold captions for short-form action clips.
+; Used by src/content/captions.py → Captioner.to_ass(). The Dialogue events
+; are appended at runtime; only the [Script Info] + [V4+ Styles] live here.
+ScriptType: v4.00+
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+PlayResX: 1080
+PlayResY: 1920
+YCbCr Matrix: TV.709
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+; ActionSub: bold white text with heavy black stroke, lower-center (alignment 2)
+;             Outline=6 for strong readability over busy action footage.
+;             MarginV=360 keeps it clear of TikTok/Reels UI overlays.
+Style: ActionSub,Arial Black,84,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,1,0,1,6,1,2,80,80,360,1
+; HookSub: brighter accent for the opening hook line (yellow-green).
+Style: HookSub,Arial Black,96,&H0000F2FF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,1,0,1,6,1,2,80,80,360,1
+

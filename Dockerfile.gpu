@@ -1,0 +1,83 @@
+# =============================================================================
+# Action-Clip-Bot GPU Server — Custom Docker Image
+#
+# Pre-installs all Python dependencies at build time so the pod starts
+# and is ready to serve in ~30-60s instead of 5-7 minutes.
+#
+# Base image: RunPod's official PyTorch 2.8 + CUDA 12.8.1 + Ubuntu 22.04
+# (matches the confirmed-working base used by pod mpkhc8qpzmke07)
+#
+# Build & push:
+#   docker build -f Dockerfile.gpu -t sudojony/action-clip-bot-gpu:latest .
+#   docker push sudojony/action-clip-bot-gpu:latest
+#
+# Then set the pod's Docker Image in RunPod to:
+#   sudojony/action-clip-bot-gpu:latest
+# =============================================================================
+
+FROM runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
+
+# Prevent interactive prompts during apt
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies.
+# libgl1 + libglib2.0-0 are required by opencv (even headless on some systems).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    git \
+    ffmpeg \
+    openssh-client \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pre-install all Python dependencies.
+#
+# Key pins:
+#   transformers==4.57.6  — transformers 5.x broke bitsandbytes layer-wise dequantization
+#   opencv-python-headless — avoids needing a display / libGL.so.1 on a headless server
+#
+# We do NOT pass -U for torch/torchvision: the base image ships a CUDA-built
+# torch and upgrading it risks breaking CUDA compatibility. All other packages
+# are installed fresh without conflicting with the base torch version.
+RUN pip install --no-cache-dir \
+    "diffusers>=0.34.0" \
+    "transformers==4.57.6" \
+    accelerate \
+    fastapi \
+    "uvicorn[standard]" \
+    nest_asyncio \
+    httpx \
+    "bitsandbytes>=0.43.0" \
+    hf_transfer \
+    imageio \
+    imageio-ffmpeg \
+    "nvidia-modelopt[hf]" \
+    "opencv-python-headless"
+
+# ── Environment variables ─────────────────────────────────────────────────────
+# Cache HuggingFace models to the RunPod network volume (persists across restarts)
+ENV HF_HOME=/workspace/huggingface
+# Speed up HF downloads using hf_transfer (Rust-based multi-part downloader)
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+# Reduce CUDA allocator fragmentation — critical for fitting FP8 + inference in 32 GB VRAM
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# torch.compile cache to persistent volume
+ENV TORCHINDUCTOR_CACHE_DIR=/workspace/torch_compile_cache
+# Tell gpu_server.py all deps are pre-installed — skips the in-process pip install
+ENV DEPS_PREINSTALLED=1
+
+# ── Copy server script ────────────────────────────────────────────────────────
+# Bake gpu_server.py into the image at /opt/gpu_server.py.
+# The entrypoint script below copies it to /workspace/ at runtime so that
+# even if RunPod mounts an empty network volume over /workspace, the server
+# file is always present and up to date.
+COPY gpu_server.py /opt/gpu_server.py
+
+# Expose the FastAPI port
+EXPOSE 8000
+
+# ── Entrypoint ────────────────────────────────────────────────────────────────
+# Copy the baked server script into /workspace (the RunPod network volume mount
+# point) so it is always available even after a fresh volume mount, then start it.
+CMD ["/bin/bash", "-c", "cp /opt/gpu_server.py /workspace/gpu_server.py && exec python /workspace/gpu_server.py"]

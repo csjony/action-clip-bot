@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Generated Videos — Action Clip Bot{% endblock %}
+{% block content %}
+<h1>Assembled Video Database</h1>
+<p class="muted" style="margin-bottom: 2rem;">Overview of all generated video scripts, metadata, rendering status, and external publishing links.</p>
+
+{% if posts %}
+<div class="table-container">
+  <table>
+    <thead>
+      <tr><th>ID</th><th>Created At</th><th>Title / Theme</th><th>Status</th><th>Published Links</th></tr>
+    </thead>
+    <tbody>
+    {% for p in posts %}
+      <tr>
+        <td><strong>#{{ p.id }}</strong></td>
+        <td style="font-family: monospace; color: var(--text-muted);">{{ fmt_ts(p.created_at) }}</td>
+        <td>
+          <div style="font-weight: 600; font-size: 0.95rem; color: #fff; margin-bottom: 0.25rem;">
+            {{ p.title[:60] }}{% if p.title|length > 60 %}…{% endif %}
+          </div>
+          <span class="badge" style="background: rgba(99, 102, 241, 0.1); color: var(--primary); font-size: 0.72rem; padding: 1px 6px;">
+            Theme: {{ p.theme or "General" }}
+          </span>
+        </td>
+        <td>
+          {% if p.status == "published" %}
+            <span class="badge badge-ok">✅ Published</span>
+          {% elif p.status == "failed" %}
+            <span class="badge badge-fail">❌ Failed</span>
+          {% else %}
+            <span class="badge badge-dry">📝 Draft</span>
+          {% endif %}
+        </td>
+        <td>
+          <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            {% if p.youtube_url %}<a href="{{ p.youtube_url }}" target="_blank" class="btn btn-sm btn-secondary" style="font-size: 0.75rem; padding: 2px 8px;">YouTube ↗</a>{% endif %}
+            {% if p.facebook_url %}<a href="{{ p.facebook_url }}" target="_blank" class="btn btn-sm btn-secondary" style="font-size: 0.75rem; padding: 2px 8px;">Facebook ↗</a>{% endif %}
+            {% if p.instagram_url %}<a href="{{ p.instagram_url }}" target="_blank" class="btn btn-sm btn-secondary" style="font-size: 0.75rem; padding: 2px 8px;">Instagram ↗</a>{% endif %}
+            {% if p.threads_url %}<a href="{{ p.threads_url }}" target="_blank" class="btn btn-sm btn-secondary" style="font-size: 0.75rem; padding: 2px 8px;">Threads ↗</a>{% endif %}
+            {% if p.tiktok_url %}<a href="{{ p.tiktok_url }}" target="_blank" class="btn btn-sm btn-secondary" style="font-size: 0.75rem; padding: 2px 8px;">TikTok ↗</a>{% endif %}
+            {% if not p.youtube_url and not p.facebook_url and not p.instagram_url and not p.threads_url and not p.tiktok_url %}
+              <span class="muted" style="font-size: 0.85rem;">Local only</span>
+            {% endif %}
+          </div>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p class="muted">No video database entries yet. Launch a new run to create one!</p>
+{% endif %}
+{% endblock %}

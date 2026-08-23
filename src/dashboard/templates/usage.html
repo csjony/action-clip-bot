@@ -1,0 +1,506 @@
+{% extends "base.html" %}
+{% block title %}Usage & Cost Observatory — Action Clip Bot{% endblock %}
+{% block content %}
+<h1>Usage & Cost Observatory</h1>
+
+<div class="cards">
+  <div class="card" style="grid-column: span 2;">
+    <h3>💰 Monthly Paid Spend</h3>
+    {% set spend_pct = (monthly_spend / budget_cap * 100) if budget_cap > 0 else 0 %}
+    <div class="meter">
+      <div class="meter-fill" style="width:{% if spend_pct > 100 %}100{% else %}{{ "%.0f"|format(spend_pct) }}{% endif %}%; background:{% if spend_pct > 80 %}var(--danger){% elif spend_pct > 50 %}var(--warn){% else %}var(--success){% endif %}"></div>
+    </div>
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <span style="font-weight:700; font-size:1.1rem;">${{ "%.2f"|format(monthly_spend) }} <span style="font-weight:400; color:var(--text-muted);">/ ${{ "%.2f"|format(budget_cap) }}</span></span>
+      <span class="badge {% if spend_pct > 80 %}badge-fail{% else %}badge-ok{% endif %}">{{ "%.1f"|format(spend_pct) }}% limit</span>
+    </div>
+  </div>
+</div>
+
+<h2>Free-Tier Credits (This Period)</h2>
+<div class="table-container">
+  <table>
+    <thead>
+      <tr><th>Provider</th><th>Period</th><th>Used</th><th>Remaining</th><th>Cap</th><th>Accounts</th></tr>
+    </thead>
+    <tbody>
+    {% for d in credit_data %}
+      <tr>
+        <td><strong>{{ d.provider }}</strong></td>
+        <td><span class="badge badge-dry">{{ d.kind }}</span></td>
+        <td>{{ d.used }}</td>
+        <td>
+          <span class="{% if d.remaining == 0 %}text-danger{% elif d.remaining < 10 %}text-warn{% else %}text-success{% endif %}">
+            {{ d.remaining }}
+          </span>
+        </td>
+        <td>{{ d.cap }}</td>
+        <td>{{ d.accounts|length }} configured</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h2>Account API Usage Inspector</h2>
+
+<!-- Controls row -->
+<div class="usage-controls">
+
+  <!-- Time range tabs -->
+  <div class="usage-filters" style="flex: 1; margin-bottom: 0;">
+    <div class="filter-tabs">
+      <button class="filter-tab active" data-range="24h">24 Hours</button>
+      <button class="filter-tab" data-range="7d">7 Days</button>
+      <button class="filter-tab" data-range="monthly">Monthly</button>
+      <button class="filter-tab" data-range="custom">Custom</button>
+    </div>
+    <div class="custom-range-inputs" id="custom-range-inputs" style="display: none;">
+      <label for="start-date">From:</label>
+      <input type="date" id="start-date">
+      <label for="end-date">To:</label>
+      <input type="date" id="end-date">
+      <button class="btn btn-sm" id="apply-custom-btn">Apply</button>
+    </div>
+  </div>
+
+  <!-- Provider & Account selectors -->
+  <div class="account-selectors">
+    <div class="selector-group">
+      <label class="selector-label" for="provider-select">Provider</label>
+      <div class="custom-select-wrapper">
+        <select id="provider-select" class="custom-select">
+          <option value="">— All Providers —</option>
+        </select>
+        <span class="select-arrow">▾</span>
+      </div>
+    </div>
+
+    <div class="selector-group">
+      <label class="selector-label" for="account-select">Account</label>
+      <div class="custom-select-wrapper">
+        <select id="account-select" class="custom-select" disabled>
+          <option value="">— Select a provider first —</option>
+        </select>
+        <span class="select-arrow">▾</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Detail panel (hidden until account selected) -->
+<div id="usage-detail-panel" style="display:none; margin-top: 2rem;"></div>
+
+<!-- Empty / placeholder state -->
+<div id="usage-placeholder" style="margin-top: 2.5rem; text-align: center; padding: 3.5rem 2rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg);">
+  <div style="font-size: 3rem; margin-bottom: 1rem; opacity: 0.4;">📊</div>
+  <p style="color: var(--text-muted); margin: 0; font-size: 1rem;">Select a <strong style="color:#fff;">Provider</strong> and then an <strong style="color:#fff;">Account</strong> above to inspect its API usage metrics.</p>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  const tabs           = document.querySelectorAll(".filter-tab");
+  const customInputs   = document.getElementById("custom-range-inputs");
+  const startDateInput = document.getElementById("start-date");
+  const endDateInput   = document.getElementById("end-date");
+  const applyBtn       = document.getElementById("apply-custom-btn");
+  const providerSel    = document.getElementById("provider-select");
+  const accountSel     = document.getElementById("account-select");
+  const detailPanel    = document.getElementById("usage-detail-panel");
+  const placeholder    = document.getElementById("usage-placeholder");
+
+  let currentRange = "24h";
+  let allStats     = [];   // full API response cached per fetch
+
+  // Default custom dates
+  const today = new Date().toISOString().split('T')[0];
+  endDateInput.value = today;
+  const lastWeek = new Date();
+  lastWeek.setDate(lastWeek.getDate() - 7);
+  startDateInput.value = lastWeek.toISOString().split('T')[0];
+
+  // ── Helpers ──────────────────────────────────────────────────────────────
+
+  function buildStatsUrl() {
+    let url = `/api/usage/stats?range=${currentRange}`;
+    if (currentRange === "custom") {
+      url += `&start=${startDateInput.value}&end=${endDateInput.value}`;
+    }
+    return url;
+  }
+
+  function getUniqProviders(stats) {
+    const seen = new Set();
+    return stats.filter(a => { const k = a.provider; if (seen.has(k)) return false; seen.add(k); return true; }).map(a => a.provider);
+  }
+
+  function populateProviderDropdown(stats) {
+    const providers = getUniqProviders(stats);
+    const prev = providerSel.value;
+    providerSel.innerHTML = '<option value="">— All Providers —</option>';
+    providers.forEach(p => {
+      const opt = document.createElement("option");
+      opt.value = p;
+      opt.textContent = p.charAt(0).toUpperCase() + p.slice(1);
+      providerSel.appendChild(opt);
+    });
+    if (prev && providers.includes(prev)) {
+      providerSel.value = prev;
+      populateAccountDropdown(stats, prev);
+    }
+  }
+
+  function populateAccountDropdown(stats, provider) {
+    const accounts = stats.filter(a => a.provider === provider);
+    const prev = accountSel.value;
+    accountSel.innerHTML = '<option value="">— Select Account —</option>';
+    if (!provider) {
+      accountSel.disabled = true;
+      accountSel.innerHTML = '<option value="">— Select a provider first —</option>';
+      return;
+    }
+    accounts.forEach(a => {
+      const opt = document.createElement("option");
+      opt.value = String(a.account_id ?? "env");
+      const email = a.email && a.email !== "env" ? ` · ${a.email}` : "";
+      opt.textContent = `${a.label}${email}`;
+      accountSel.appendChild(opt);
+    });
+    accountSel.disabled = false;
+
+    // Re-select previous if still available
+    const ids = accounts.map(a => String(a.account_id ?? "env"));
+    if (prev && ids.includes(prev)) {
+      accountSel.value = prev;
+      showDetail(stats, provider, prev);
+    } else {
+      // Clear detail if the previous selection no longer valid
+      detailPanel.style.display = "none";
+      placeholder.style.display = "block";
+    }
+  }
+
+  // ── Render detail panel ──────────────────────────────────────────────────
+
+  function showDetail(stats, provider, accountIdStr) {
+    const acc = stats.find(a => a.provider === provider && String(a.account_id ?? "env") === accountIdStr);
+    if (!acc) {
+      detailPanel.style.display = "none";
+      placeholder.style.display = "block";
+      return;
+    }
+
+    placeholder.style.display = "none";
+    detailPanel.style.display = "block";
+
+    const s = acc.stats;
+    const total   = s.total_requests || 0;
+    const success = s.success_requests || 0;
+    const failed  = total - success;
+    const rate    = total > 0 ? Math.round((success / total) * 100) : 0;
+    const isLLM   = acc.provider === "gemini" || acc.provider === "groq";
+    const totalTokens = (s.total_prompt_tokens || 0) + (s.total_completion_tokens || 0);
+
+    const rateColor = rate >= 90 ? "var(--success)" : rate >= 60 ? "var(--warn)" : total === 0 ? "var(--text-muted)" : "var(--danger)";
+    const statusDot = acc.enabled
+      ? `<span class="status-indicator status-active"></span> <span class="text-success">Active</span>`
+      : `<span class="status-indicator status-inactive"></span> <span class="text-danger">Disabled</span>`;
+
+    detailPanel.innerHTML = `
+      <div class="detail-header">
+        <div>
+          <div class="detail-title">${acc.label}</div>
+          <div class="detail-meta">
+            <span class="badge badge-dry" style="text-transform:uppercase; letter-spacing:.05em;">${acc.provider}</span>
+            ${acc.email && acc.email !== "env" ? `<span class="muted" style="font-size:.85rem;">· ${acc.email}</span>` : ""}
+            <span class="muted" style="font-size:.85rem;">· ID #${acc.account_id ?? "env"}</span>
+          </div>
+        </div>
+        <div style="display:flex; align-items:center; gap:.5rem;">${statusDot}</div>
+      </div>
+
+      <div class="detail-grid">
+        <!-- Requests -->
+        <div class="detail-card">
+          <div class="detail-card-label">Total Requests</div>
+          <div class="detail-card-value">${total.toLocaleString()}</div>
+          <div class="detail-card-sub">${currentRange === "24h" ? "Last 24 hours" : currentRange === "7d" ? "Last 7 days" : currentRange === "monthly" ? "Last 30 days" : "Custom range"}</div>
+        </div>
+
+        <!-- Success / Failed -->
+        <div class="detail-card">
+          <div class="detail-card-label">Success / Failed</div>
+          <div class="detail-card-value" style="color: var(--success);">${success.toLocaleString()} <span style="color:var(--text-muted); font-size:1rem;">/ <span style="color:var(--danger);">${failed}</span></span></div>
+          <div style="margin-top:.75rem;">
+            <div class="meter"><div class="meter-fill" style="width:${rate}%; background:${rateColor};"></div></div>
+            <div style="display:flex; justify-content:space-between; margin-top:.25rem;">
+              <span class="muted" style="font-size:.78rem;">Success rate</span>
+              <span style="font-size:.78rem; font-weight:700; color:${rateColor};">${total === 0 ? "N/A" : rate + "%"}</span>
+            </div>
+          </div>
+        </div>
+
+        ${isLLM ? `
+        <!-- Prompt tokens -->
+        <div class="detail-card">
+          <div class="detail-card-label">Prompt Tokens</div>
+          <div class="detail-card-value" style="color: var(--secondary);">${(s.total_prompt_tokens || 0).toLocaleString()}</div>
+          <div class="detail-card-sub">Input to model</div>
+        </div>
+
+        <!-- Completion tokens -->
+        <div class="detail-card">
+          <div class="detail-card-label">Completion Tokens</div>
+          <div class="detail-card-value" style="color: var(--secondary);">${(s.total_completion_tokens || 0).toLocaleString()}</div>
+          <div class="detail-card-sub">Generated output</div>
+        </div>
+
+        <!-- Total tokens -->
+        <div class="detail-card">
+          <div class="detail-card-label">Total Tokens</div>
+          <div class="detail-card-value">${totalTokens.toLocaleString()}</div>
+          <div class="detail-card-sub">Prompt + Completion</div>
+        </div>
+        ` : ""}
+
+        <!-- Cost -->
+        <div class="detail-card detail-card-highlight">
+          <div class="detail-card-label">Estimated Cost (USD)</div>
+          <div class="detail-card-value metric-cost">$${(s.total_cost_usd || 0).toFixed(6)}</div>
+          <div class="detail-card-sub">Based on public pricing</div>
+        </div>
+      </div>
+    `;
+  }
+
+  // ── Event wiring ─────────────────────────────────────────────────────────
+
+  async function fetchAndRender() {
+    providerSel.disabled = true;
+    accountSel.disabled  = true;
+    detailPanel.style.display = "none";
+    placeholder.innerHTML = `
+      <div style="font-size: 1.5rem; margin-bottom: 1rem; animation: spin 1s infinite linear;">🔄</div>
+      <p style="color: var(--text-muted); margin:0;">Loading usage data…</p>
+    `;
+    placeholder.style.display = "block";
+
+    try {
+      const res  = await fetch(buildStatsUrl());
+      const data = await res.json();
+      allStats = data.accounts_stats || [];
+      populateProviderDropdown(allStats);
+
+      // Restore placeholder if nothing selected yet
+      if (!providerSel.value) {
+        placeholder.innerHTML = `
+          <div style="font-size: 3rem; margin-bottom: 1rem; opacity: 0.4;">📊</div>
+          <p style="color: var(--text-muted); margin: 0; font-size: 1rem;">Select a <strong style="color:#fff;">Provider</strong> and then an <strong style="color:#fff;">Account</strong> above to inspect its API usage metrics.</p>
+        `;
+        placeholder.style.display = "block";
+      }
+    } catch (e) {
+      placeholder.innerHTML = `
+        <div style="font-size: 2rem; margin-bottom: 1rem;">⚠️</div>
+        <p style="color: var(--danger); margin:0;">Failed to load usage data: ${e}</p>
+      `;
+      placeholder.style.display = "block";
+    } finally {
+      providerSel.disabled = false;
+      if (providerSel.value) accountSel.disabled = false;
+    }
+  }
+
+  // Provider changed
+  providerSel.addEventListener("change", () => {
+    const p = providerSel.value;
+    if (!p) {
+      accountSel.innerHTML = '<option value="">— Select a provider first —</option>';
+      accountSel.disabled = true;
+      detailPanel.style.display = "none";
+      placeholder.innerHTML = `
+        <div style="font-size: 3rem; margin-bottom: 1rem; opacity: 0.4;">📊</div>
+        <p style="color: var(--text-muted); margin: 0; font-size: 1rem;">Select a <strong style="color:#fff;">Provider</strong> and then an <strong style="color:#fff;">Account</strong> above.</p>
+      `;
+      placeholder.style.display = "block";
+      return;
+    }
+    populateAccountDropdown(allStats, p);
+  });
+
+  // Account changed
+  accountSel.addEventListener("change", () => {
+    const p = providerSel.value;
+    const a = accountSel.value;
+    if (p && a) {
+      showDetail(allStats, p, a);
+    } else {
+      detailPanel.style.display = "none";
+      placeholder.style.display = "block";
+    }
+  });
+
+  // Time range tabs
+  tabs.forEach(tab => {
+    tab.addEventListener("click", () => {
+      tabs.forEach(t => t.classList.remove("active"));
+      tab.classList.add("active");
+      currentRange = tab.dataset.range;
+      if (currentRange === "custom") {
+        customInputs.style.display = "flex";
+      } else {
+        customInputs.style.display = "none";
+        fetchAndRender();
+      }
+    });
+  });
+
+  applyBtn.addEventListener("click", fetchAndRender);
+
+  // Initial load
+  fetchAndRender();
+});
+</script>
+
+<style>
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* Controls row */
+.usage-controls {
+  display: flex;
+  align-items: flex-start;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.5rem;
+}
+
+/* Account selectors */
+.account-selectors {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-end;
+  flex-shrink: 0;
+}
+.selector-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.selector-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.custom-select-wrapper {
+  position: relative;
+}
+.custom-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: rgba(0,0,0,0.3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  padding: 0.6rem 2.5rem 0.6rem 1rem;
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  font-weight: 500;
+  min-width: 200px;
+  cursor: pointer;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.custom-select:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+.custom-select:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.select-arrow {
+  position: absolute;
+  right: 0.75rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  pointer-events: none;
+  font-size: 0.85rem;
+}
+
+/* Detail header */
+.detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+.detail-title {
+  font-family: var(--font-title);
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: #fff;
+  margin-bottom: 0.4rem;
+}
+.detail-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+/* Detail stat cards grid */
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 1.25rem;
+}
+.detail-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.25rem 1.5rem;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.25s ease, border-color 0.25s ease;
+}
+.detail-card:hover {
+  transform: translateY(-3px);
+  border-color: rgba(99,102,241,0.35);
+}
+.detail-card-highlight {
+  border-color: rgba(16,185,129,0.25);
+  background: rgba(16,185,129,0.04);
+}
+.detail-card-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+}
+.detail-card-value {
+  font-family: var(--font-title);
+  font-size: 2rem;
+  font-weight: 700;
+  color: #fff;
+  margin-bottom: 0.25rem;
+  line-height: 1.1;
+}
+.detail-card-sub {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 0.5rem;
+}
+</style>
+{% endblock %}

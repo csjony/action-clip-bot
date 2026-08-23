@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Action Clip Bot{% endblock %}
+{% block content %}
+<h1>Dashboard Overview</h1>
+
+<div class="cards">
+  <!-- Budget card -->
+  <div class="card">
+    <h3>💰 Monthly Budget</h3>
+    <div class="meter">
+      <div class="meter-fill" style="width:{{ spend_pct }}%; background:{% if spend_pct > 80 %}var(--danger){% elif spend_pct > 50 %}var(--warn){% else %}var(--success){% endif %}"></div>
+    </div>
+    <p style="font-weight: 600; font-size: 1.1rem; margin-top: 0.5rem;">
+      ${{ "%.2f"|format(spend) }} <span style="font-weight:400; color:var(--text-muted);">/ ${{ "%.2f"|format(cap) }}</span>
+    </p>
+  </div>
+
+  <!-- Posts card -->
+  <div class="card">
+    <h3>📹 Videos Generated</h3>
+    <p style="font-size: 1.25rem; font-weight: 700; margin-bottom: 0.25rem;">
+      {{ week_count }} <span style="font-weight:400; font-size: 0.9rem; color:var(--text-muted);">this week</span>
+    </p>
+    <p class="muted">{{ total_posts }} total videos assembled</p>
+  </div>
+
+  <!-- Current run -->
+  <div class="card">
+    <h3>⚡ Pipeline Status</h3>
+    {% if current_run %}
+      <p style="margin-bottom: 0.75rem;">Run in progress: <code>{{ current_run[:12] }}…</code></p>
+      <a href="/runs/{{ current_run }}" class="btn btn-sm btn-primary">View Live Status →</a>
+    {% else %}
+      <p class="muted" style="margin-bottom: 0.75rem;">Idle — no run in progress</p>
+      <a href="/generate" class="btn btn-sm btn-secondary">New Generation Run →</a>
+    {% endif %}
+  </div>
+</div>
+
+<h2>Recent Execution Runs</h2>
+{% if runs %}
+<div class="table-container">
+  <table>
+    <thead>
+      <tr><th>Started</th><th>Status</th><th>Events</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+    {% for r in runs %}
+      <tr>
+        <td style="font-family: monospace; color: var(--text-muted);">{{ r.started_at[:19] if r.started_at else "—" }}</td>
+        <td>
+          {% if r.latest_kind == "run_finished" %}
+            <span class="badge badge-ok">✅ Finished</span>
+          {% elif r.latest_kind == "run_failed" %}
+            <span class="badge badge-fail">❌ Failed</span>
+          {% else %}
+            <span class="badge badge-running">🔄 Running</span>
+          {% endif %}
+        </td>
+        <td><span class="badge badge-dry">{{ r.event_count }} events</span></td>
+        <td><a href="/runs/{{ r.run_id }}" class="btn btn-sm btn-secondary">Details →</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p class="muted">No runs recorded yet. <a href="/generate">Generate your first video →</a></p>
+{% endif %}
+{% endblock %}

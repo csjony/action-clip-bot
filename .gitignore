@@ -1,0 +1,28 @@
+# Secrets
+.env
+config/youtube_client_secret.json
+config/*.token.json
+
+# Generated assets & state
+data/*
+!data/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated Videos
+*.mp4
+output_*

@@ -1,0 +1,704 @@
+# =============================================================================
+# ACTION CLIP BOT — MASTER MANIFEST
+# =============================================================================
+# Purpose: Complete technical reference for the bot's architecture, goals,
+#          pipeline, RunPod infrastructure, and operational details.
+#          Any future developer (or AI) reading this should have a full picture
+#          of how everything works without needing to read the source code first.
+# Last updated: 2026-07-06 (v3.6.0 — added producer-consumer batch queue design)
+# Version: 3.6.0
+# =============================================================================
+
+name: "Action Clip Bot"
+version: "3.6.0"
+
+# =============================================================================
+# EMERGENCY MANUAL POD STARTUP RUNBOOK (IF AUTOMATIC STEPS STUCK)
+# =============================================================================
+manual_pod_setup:
+  description: |
+    Use this workflow if the automatic generator boot / SSH bootstrap hangs.
+    Your persistent volume `/workspace` holds all cached models.
+  steps:
+    1_create_pod: |
+      Create/start a pod on RunPod with an NVIDIA A40 GPU (48 GB VRAM — current production).
+      Attach your persistent network volume (150 GB) mounted at `/workspace`.
+      Ensure port 8000 (TCP) and port 22 (SSH) are exposed in pod port settings.
+    2_verify_model_cache: |
+      SSH into the pod: ssh -p <port> root@<ip>
+      Check if the model folder exists: ls -la /workspace/huggingface/hub/models--Wan-AI--Wan2.2-T2V-A14B-Diffusers
+      (The FP8 variant models--nvidia--Wan2.2-T2V-A14B-Diffusers-FP8 can be deleted to free ~30 GB space.)
+      (If missing, run Step 4 in manual runbook to fetch).
+    3_launch_gpu_server: |
+      Paste this command into the SSH terminal to start the FastAPI server:
+        export HF_TOKEN=<huggingface_token>
+        export HUGGING_FACE_HUB_TOKEN=<huggingface_token>
+        export WAN_MODEL_ID=Wan-AI/Wan2.2-T2V-A14B-Diffusers
+        export PYTHONUNBUFFERED=1
+        setsid /root/venv/bin/python3 -u /workspace/gpu_server.py > /workspace/gpu_server.log 2>&1 < /dev/null &
+        echo "Started PID: $!"
+    4_monitor_logs: |
+      Watch model loading progress (takes ~3 minutes):
+        tail -f /workspace/gpu_server.log
+      Ready when it prints: "Model loaded successfully! Ready to generate videos."
+    5_local_verify: |
+      Confirm readiness locally on pod:
+        curl http://localhost:8000/ready
+      Should output: {"status":"ready","device":"cuda"}
+    6_update_local_env: |
+      On your local PC, update `.env` with the new Pod ID:
+        RUNPOD_POD_ID=<new_pod_id>
+      Confirm proxy readiness from local PC:
+        curl https://<new_pod_id>-8000.proxy.runpod.net/ready
+    7_start_generation: |
+      Start generation from the dashboard or CLI:
+        .venv/bin/python -m src.pipeline --quick-run
+
+# =============================================================================
+# WHAT WE WANTED TO BUILD
+# =============================================================================
+goal: |
+  A fully automated, zero-touch AI video pipeline that:
+  1. Generates cinematic short-form video content targeting European audiences.
+  2. Renders AI video clips on a pay-per-use cloud GPU (RunPod H200 SXM — current production).
+  3. Automatically composes, edits, and narrates the final video on the local PC.
+  4. Publishes simultaneously to YouTube, TikTok, Instagram, Facebook, and Threads.
+  5. Runs at ~$2.35 per full 13-clip run (or ~$0.29 per platform upload) on H200 at native BF16 quality.
+
+target_audience: "European (UK, Germany, France, Spain, Italy, Netherlands, Scandinavia)"
+
+content_style: |
+  Cinematic action sequences with European settings (cities, architecture, weather).
+  Visual hook in first 3 seconds (high-contrast, fast-motion). No dialogue.
+  Background music only (Jamendo royalty-free). Scene-aware SFX layered per clip.
+
+monetization_roadmap:
+  target_platforms:
+    youtube_longform: "YouTube landscape (16:9) — high CPM long-form content"
+    youtube_shorts:   "YouTube Shorts (9:16) — auto-split Part 1 & Part 2"
+    tiktok:           "TikTok Creator Rewards (>60s) — split Part 1 & Part 2"
+    facebook:         "Facebook In-Stream Ads & Reels — full-length horizontal"
+    instagram:        "Instagram Reels — split Part 1 & Part 2"
+    threads:          "Threads — full vertical video"
+  cadence_options:
+    high_quality: "10 videos/month → 10 long-form + 20 shorts = 30 total uploads (~$23.50/mo)"
+    high_volume:  "30 videos/month → 30 long-form + 60 shorts = 90 total uploads (~$70.50/mo)"
+
+# =============================================================================
+# HIGH-LEVEL PIPELINE — 5 PHASES
+# =============================================================================
+# Each phase runs sequentially. All phases except [2/5] run on the LOCAL PC.
+# Phase [2/5] sends generation jobs to the GPU VPS (RunPod) over HTTPS.
+# =============================================================================
+
+pipeline_phases:
+
+  "1_scriptwriter":
+    runs_on: "Local PC"
+    description: |
+      The Gemini LLM generates a full production plan for the video.
+      Output includes: title, theme, per-scene visual prompts, narration text,
+      per-scene sound_query strings, platform-specific captions, and hashtags.
+      Supports a Manual Script JSON override in the dashboard to bypass Gemini entirely.
+    engine: "Google Gemini (google-genai SDK)"
+    model: "gemini-2.5-flash (configurable)"
+    fallback: "Multi-key rotation if rate limit hit"
+    output: "A structured Python dataclass (ContentPlan) with all scenes"
+    typical_duration: "~44 seconds"
+
+  "2_generators":
+    runs_on: "GPU VPS (RunPod H200 SXM 141 GB VRAM) — orchestrated from Local PC"
+    description: |
+      For each scene, sends the visual prompt to gpu_server.py running on the
+      RunPod pod. The server encodes the prompt, runs the full Wan 2.2 dual-expert
+      diffusion model in native BF16, and returns the rendered MP4. Each clip
+      is downloaded to the local PC before moving to the next scene.
+      Clips are stored under data/runs/<stamp>/clips/.
+    engine: "LocalGenerator → RunPodManager → gpu_server.py"
+    model: "Wan-AI/Wan2.2-T2V-A14B-Diffusers — native BF16, full dual-expert MoE (transformer + transformer_2)"
+    resolution: "832×480 (generation) → upscaled to 1280×720 via Lanczos → 1920×1080 in editor"
+    clip_duration: "5s per clip (quick-run) / 6s per clip (full run)"
+    num_clips: "3 clips (quick-run) / 12-13 clips (full run)"
+    total_video_duration: "~15s (quick) / ~70-80s (full)"
+    typical_duration_per_clip: |
+      H200 SXM (native BF16, no offloading, all on GPU VRAM, 832x480):
+      VERIFIED 2026-07-06 production run (Urban Pursuit — Speed Test):
+      - Clip 0 (anchor, 12 steps): 1m 52s total (text encoding ~12s + 12 × 9.4s diffusion + VAE decode)
+      - Clip 1 (subsequent, 5 steps): 56s total
+      - Clip 2 (subsequent, 5 steps): 56s total
+      - Full 3-clip run wall time: ~3m 44s generation
+      Text encoder warmup during model load eliminates the previous 3m 28s first-clip JIT delay.
+      TF32 matmul precision enabled for minor per-step speedup on Hopper.
+    post_phase_action: |
+      The RunPod pod is STOPPED immediately after all clips are downloaded,
+      before phases 3/4/5 begin. This saves 15-20 minutes of idle GPU billing.
+
+  "3_audio":
+    runs_on: "Local PC"
+    description: |
+      Generates voiceover audio (Edge-TTS, currently disabled in BGM-only mode),
+      transcribes captions (Whisper, currently disabled), picks and downloads
+      background music from Jamendo API (theme-aware search + local cache),
+      and picks scene-specific SFX (Freesound / ElevenLabs / Replicate MMAudio).
+    typical_duration: "~7 minutes (mostly Jamendo download + SFX API calls)"
+
+  "4_editor":
+    runs_on: "Local PC"
+    description: |
+      Uses FFmpeg to stitch all clips, overlay SFX at correct timestamps,
+      mix BGM at configured loudness (LUFS), apply transitions, and render
+      both a horizontal (16:9, 1920×1080) and vertical (9:16, 1080×1920) version.
+      Vertical videos ≥ 60s are auto-split into Part 1 & Part 2 for shorts.
+    engine: "FFmpeg 6.x"
+    output: "data/runs/<stamp>/final/ — horizontal.mp4, vertical.mp4 (+ parts)"
+    typical_duration: "~25 seconds"
+
+  "5_publisher":
+    runs_on: "Local PC"
+    description: |
+      Uploads the rendered videos to all configured platforms simultaneously.
+      Full horizontal → YouTube long-form + Facebook.
+      Full vertical → Threads.
+      Split parts → YouTube Shorts + TikTok + Instagram Reels.
+    mode: "dry-run (default for quick-run) / live publishing"
+    typical_duration: "Skipped in quick-run; varies by platform API speed in live mode"
+
+# =============================================================================
+# RUNPOD INFRASTRUCTURE — DETAILED
+# =============================================================================
+
+runpod:
+  purpose: |
+    RunPod provides an on-demand GPU server (NVIDIA A40, 48 GB VRAM) to run the full
+    Wan 2.2 14B dual-expert model in native BF16. The pod is started at the beginning
+    of clip generation and stopped immediately after all clips are downloaded, minimizing
+    billing. CPU offloading (via accelerate) handles expert swapping within VRAM budget.
+
+  cost_model:
+    gpu: "NVIDIA A40 (48 GB VRAM) — current production"
+    cost_per_hour: "$0.44/hr"
+    cost_per_clip_actual: "~$0.006–0.008 per clip (~50–65s/clip at 20 steps, 720p)"
+    cost_per_quick_run: "~$0.03 (3 clips, ~4 minutes)"
+    cost_per_full_run: "~$0.10 (13 clips, ~14 minutes)"
+    billing_model: |
+      RunPod bills by the second while the pod is in RUNNING state.
+      When EXITED/STOPPED, there is no compute billing (only storage if volume attached).
+
+  gpu_comparison_and_plan:
+    description: |
+      Current production is H200 SXM (141 GB VRAM), running the full Wan 2.2 dual-expert
+      MoE model in native BF16 with all weights residing fully in GPU VRAM (no offloading).
+      This achieves maximum inference speeds (~12-15 seconds per 6-second clip).
+      We run at 832x480 resolution with a flat 20 denoising steps to achieve a target cost
+      of ~$2.35 per video (~$0.29 per platform upload across 8 platforms).
+    step_count_tiers:
+      15_steps:
+        quality: "Entry level / Casual"
+        cost_per_run: "~$1.75"
+        notes: "Fast and cheapest, but fast motion shows minor soft spots or local noise."
+      20_steps:
+        quality: "Monetization Grade (Sweet Spot)"
+        cost_per_run: "~$2.35"
+        notes: "Crisp visual details, sharp motion boundaries. Highly recommended for organic promotion."
+      25_steps:
+        quality: "Cinematic Premium"
+        cost_per_run: "~$2.95"
+        notes: "Excellent photorealism, slightly slower generation, diminished financial returns."
+      30_steps:
+        quality: "Studio Master"
+        cost_per_run: "~$3.50"
+        notes: "Maximum possible quality, extremely high cost, financially inefficient."
+    gpu_options:
+      H200_SXM:
+        vram: "141 GB"
+        cost_per_hour: "$4.39"
+        execution_mode: "All models permanently on GPU (no offloading) — maximum speed"
+        model: "Wan-AI/Wan2.2-T2V-A14B-Diffusers — native BF16"
+        seconds_per_step: "~9.4s (832x480, BF16, Hopper sm_90)"
+        time_per_clip: "Anchor (12 steps): ~1m 52s; Subsequent (5 steps): ~56s [VERIFIED 2026-07-06]"
+        cost_per_clip: "Anchor: ~$0.014; Subsequent: ~$0.007"
+        cost_per_quick_run: "~$0.04 (3 clips, ~4 min GPU time)"
+        cost_per_full_run: "~$0.70 (13 clips, ~18 min GPU time + pod startup overhead)"
+        recommended: true
+        optimisations_active:
+          - "Text encoder (UMT5-XXL) pre-warmed during model load — eliminates 3m 28s first-clip JIT delay"
+          - "TF32 matmul precision set to HIGH (torch.set_float32_matmul_precision)"
+          - "anchor_steps=12, subsequent_steps=5 — dual-quality cost-efficient strategy"
+          - "Pod auto-stopped after generation phase to eliminate idle billing"
+        note: |
+          Native BF16 weights, full dual-expert MoE on GPU. No offloading delays.
+          Pod stopped automatically post-generation to eliminate idle billing.
+          torch.compile() was tested but removed due to PEFT CUDAGraphs conflict in diffusers.
+      A40:
+        vram: "48 GB"
+        cost_per_hour: "$0.44"
+        execution_mode: "CPU offloading (accelerate) — one expert active on GPU at a time"
+        model: "Wan-AI/Wan2.2-T2V-A14B-Diffusers — native BF16, no quantization"
+        seconds_per_step: "~2–3s (native BF16, Ampere sm_86)"
+        time_per_clip: "~50–65 seconds (20 steps, 832x480)"
+        cost_per_clip: "~$0.007"
+        cost_per_full_run: "~$0.10 (13 clips, ~14 min)"
+        recommended: false
+        note: |
+          Cheap, but takes ~15 minutes per generation, which blocks parallel runs.
+          Good fallback when budget is extremely tight.
+      RTX_4090:
+        vram: "24 GB"
+        cost_per_hour: "$0.34–0.59"
+        execution_mode: "CPU offloading with FP8 dequantization patch"
+        model: "nvidia/Wan2.2-T2V-A14B-Diffusers-FP8"
+        seconds_per_step: "~3–4s"
+        time_per_clip: "~35–45 seconds (10 steps, 480p)"
+        cost_per_clip: "~$0.006"
+        cost_per_full_run: "~$0.09 (13 clips)"
+        recommended: false
+        note: |
+          OOM crashes on clip 3+ during VAE decode. FP8 artifacts cause
+          gaming-like visual output. Unsuitable for organic promotion.
+
+  pod_configuration:
+    image: "sudojony/action-clip-bot-gpu:latest (custom image built from Dockerfile.gpu)"
+    gpu: "NVIDIA H200 SXM (141 GB VRAM) — current production"
+    container_disk: "5 GB (ephemeral — lost on pod termination)"
+    network_volume: |
+      Persistent volume (150 GB) mounted at /workspace.
+      Contains: gpu_server.py, full Wan 2.2 BF16 model weights — both transformer AND
+      transformer_2 experts (HuggingFace cache), logs, and output clips.
+      150 GB is required to store both MoE experts (~60 GB BF16) plus OS/cache overhead.
+      PERSISTS across pod stops, starts, and migrations.
+    exposed_ports: "8000 (HTTP API), 22 (SSH)"
+    env_key_in_dotenv: "RUNPOD_POD_ID"
+    wan_model_id_env: "WAN_MODEL_ID=Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+
+  pod_lifecycle:
+    start: |
+      1. LocalGenerator detects RUNPOD_API_KEY + RUNPOD_POD_ID in .env.
+      2. Calls RunPodManager.start_pod() via RunPod REST API POST /pods/{id}/start.
+      3. If pod is already RUNNING (e.g. pre-warmed or migrated), the start command
+         returns "already running" — this is handled gracefully.
+      4. _wait_for_running() polls GET /pods/{id} every 10s until status = RUNNING.
+         Timeout: 300 seconds.
+      5. _bootstrap_gpu_server() connects via SSH and starts gpu_server.py.
+      6. Returns the proxy URL: https://{pod_id}-8000.proxy.runpod.net
+    stop: |
+      Called from pipeline.py immediately after phase 2 (generators) completes.
+      This is an early stop optimization — the pod does NOT wait for audio/editing.
+      A safety stop in the pipeline's finally block ensures the pod stops even
+      if the early stop fails or is skipped due to an exception.
+      stop_pod() calls POST /pods/{id}/stop via REST API.
+
+  ssh_bootstrapping:
+    problem: |
+      RunPod pods boot with JupyterLab as the default entrypoint.
+      gpu_server.py does NOT start automatically on pod boot.
+      Without gpu_server.py running, the proxy URL returns 502/parking page,
+      and the pipeline would hang forever polling /ready.
+    solution: |
+      After the pod reaches RUNNING status, RunPodManager._bootstrap_gpu_server()
+      automatically connects via SSH to start gpu_server.py.
+    mechanism:
+      step_1: |
+        Fetch pod's public IP and SSH port mapping from RunPod API
+        (GET /pods/{id} → publicIp + portMappings["22"]).
+      step_2: |
+        Poll TCP socket connection to {publicIp}:{ssh_port} every 2 seconds
+        until it accepts a connection (SSH daemon ready). Timeout: 60 seconds.
+      step_3: |
+        Run SSH command:
+          pgrep -af 'python.*gpu_server' ||
+          nohup python3 /workspace/gpu_server.py >> /workspace/gpu_server.log 2>&1 &
+        This is idempotent — if gpu_server.py is already running, pgrep exits 0
+        and the nohup is skipped.
+      ssh_auth: |
+        ED25519 key-based authentication (no password).
+        Keys are pre-loaded in ~/.ssh/ on the local machine and registered in
+        the RunPod pod's authorized_keys via the RunPod console SSH key settings.
+        StrictHostKeyChecking=no + BatchMode=yes ensures non-interactive execution.
+    important_notes:
+      - "bootstrap always runs regardless of whether the pod was freshly started or already RUNNING"
+      - "this ensures gpu_server.py is active even after pod migrations to new hosts"
+      - "logs from gpu_server.py are appended to /workspace/gpu_server.log"
+
+  pod_migrations:
+    what_happens: |
+      RunPod Community Cloud pods can be migrated by RunPod to a different physical
+      host machine when the current host needs maintenance or resources are reallocated.
+      A migration creates a NEW container on a new host with a new IP address and
+      new SSH port mapping, but mounts the SAME persistent network volume (/workspace).
+    what_persists: "gpu_server.py, Wan model weights, logs, and other /workspace-backed caches"
+    what_resets: "Container environment, public IP, SSH port number, running processes"
+    manual_steps_required: |
+      After a migration, you MUST update RUNPOD_POD_ID in .env if the pod ID changes.
+      Then restart the dashboard: kill $(lsof -ti:8080) && scripts/run_dashboard.sh
+      The SSH bootstrap will handle starting gpu_server.py on the new host automatically.
+    migration_detection: |
+      The dashboard's RunPod status widget shows the current pod status. If it shows
+      an old EXITED pod while the RunPod console shows a new RUNNING pod, a migration
+      has occurred and the RUNPOD_POD_ID in .env must be updated.
+
+  proxy_url:
+    format: "https://{pod_id}-8000.proxy.runpod.net"
+    behavior: |
+      When gpu_server.py is NOT running: returns 502 or RunPod parking page (HTML).
+      When gpu_server.py IS running but model is loading: /ready returns 503.
+      When model is fully loaded: /ready returns 200 {"status": "ready"}.
+    local_generator_behavior: |
+      LocalGenerator polls /ready with a 20-minute timeout (1200s) and 15s interval.
+      Once /ready = 200, it posts generation jobs and polls /status/{job_id} every 20s.
+
+# =============================================================================
+# GPU SERVER (gpu_server.py) — DETAILED
+# =============================================================================
+
+gpu_server:
+  location: "/workspace/gpu_server.py (on the RunPod network volume)"
+  framework: "FastAPI + Uvicorn (port 8000)"
+  purpose: |
+    Runs on the RunPod pod. Loads the Wan diffusion model into GPU VRAM,
+    exposes an async HTTP API for video generation, and manages job queuing.
+
+  startup_sequence:
+    step_1: |
+      Self-bootstraps Python environment:
+      In the custom image path, dependencies are preinstalled and
+      gpu_server.py skips the slow in-process pip bootstrap.
+      In fallback/manual environments, it creates /root/venv with
+      --system-site-packages and re-executes itself inside that venv.
+    step_2: |
+      Starts FastAPI/Uvicorn server on port 8000.
+    step_3: |
+      Loads Wan model in a background thread (so /ready can respond with 503 during load):
+      - Step A: snapshot_download() fetches the COMPLETE Wan 2.2 model (both transformer
+                and transformer_2 experts) into /workspace HuggingFace cache.
+      - Step B: Load WanPipeline on CPU in bfloat16 (full MoE: both experts).
+      - Step C: Detect GPU VRAM. On <48 GB (RTX 4090): call pipe.enable_model_cpu_offload().
+                On ≥48 GB (H200/A100): load all models to CUDA permanently.
+      - Step D: With CPU offloading, accelerate registers hooks on all submodels
+                (text_encoder, transformer, transformer_2, vae) to move each to CUDA
+                only during its forward pass, then back to CPU system RAM.
+      - Step E: Enable VAE tiling. Enable attention slicing on non-Hopper GPUs.
+      - Step F: Set scheduler shift based on configured generation resolution
+                (shift=3.0 for 480p, shift=5.0 for 720p).
+    step_4: "Sets _model_loaded = True → /ready returns 200."
+
+  model_memory_layout:
+    execution_mode: "CPU offloading via accelerate (A40 path — one expert on GPU at a time)"
+    gpu_vram_during_generation: |
+      Only ONE submodel is active on GPU at any time:
+      - Text encoding phase: UMT5-XXL text encoder (~22 GB BF16) on GPU, transformers on CPU.
+      - Diffusion step (high-noise): transformer (~14 GB BF16) on GPU, rest on CPU.
+      - Diffusion step (low-noise): transformer_2 (~14 GB BF16) on GPU, rest on CPU.
+      - VAE decode phase: VAE (~0.3 GB) on GPU, transformers on CPU.
+      Peak VRAM: ~22 GB (text encoding phase) — fits comfortably in A40's 48 GB.
+      No OOM risk across unlimited clips.
+    cpu_ram: |
+      Both transformer experts: ~28 GB BF16 total in system RAM when offloaded.
+      UMT5-XXL text encoder: loaded dynamically per clip (4-bit NF4 = ~6 GB RAM spike),
+      freed immediately after prompt encoding to keep system RAM low.
+      Total peak system RAM: ~40 GB (well within RunPod's 120–128 GB pod RAM).
+    quality_note: |
+      Native BF16 weights — no FP8 quantization, no dequantization patch required.
+      Both experts run: transformer handles structure/motion (high-noise steps),
+      transformer_2 handles fine detail, texture, and color refinement (low-noise steps).
+      20 denoising steps at 720p produces cinematic, photorealistic output.
+      This is a significant upgrade from the RTX 4090 FP8 setup which produced
+      gaming-like artifacts and OOM crashes after 2 clips.
+
+  api_endpoints:
+    GET_ready: |
+      Returns 200 {"status":"ready"} when model is loaded.
+      Returns 503 while model is loading.
+      Returns 500 if model loading failed (with error detail).
+    POST_generate: |
+      Accepts {"prompt": str, "duration": int, "aspect_ratio": "16:9"}.
+      Queues a generation job and returns {"job_id": str} immediately.
+      Generation runs asynchronously in a background thread.
+    GET_status_jobid: |
+      Returns {"status": "queued"|"running"|"done"|"failed", "error": str|null}.
+    GET_result_jobid: |
+      Returns the raw MP4 binary when status = "done".
+      The LocalGenerator downloads this and writes it to the local clips directory.
+    GET_health: 'Returns {"status":"ok","model_loaded":bool} — quick liveness check.'
+    GET_debug: 'Returns detailed version info and loading status for diagnostics.'
+
+  generation_flow_per_clip:
+    step_1: "Acquire global generation lock (one clip at a time, no concurrency)."
+    step_2: |
+      Phase 1: Text encoding — accelerate moves UMT5-XXL to CUDA, encodes prompt +
+      negative prompt in BF16, moves encoder back to CPU. (~5–10s on RTX 4090).
+    step_3: "Move prompt embeddings to GPU."
+    step_4: |
+      Phase 2: Wan 2.2 dual-expert diffusion loop — 30 steps (anchor) / 12 steps (subsequent) at 832×480,
+      guidance_scale=5.0. Early steps use transformer (high-noise expert),
+      late steps switch to transformer_2 (low-noise refinement expert).
+      Scheduler shift=3.0 (correct for 480p resolution geometry).
+    step_5: "Export frames to MP4 via diffusers export_to_video at 16 fps."
+    step_6: "Store result path in job dict. Status → 'done'."
+
+  timing_breakdown_per_clip:
+    rtx_4090_legacy:
+      note: "LEGACY — retired due to OOM crashes and FP8 visual artifacts"
+      model: "nvidia/Wan2.2-T2V-A14B-Diffusers-FP8"
+      gpu_diffusion_loop: "~35s (10 steps × 3.5s/step — FP8 cast overhead)"
+      quality: "BAD — gaming-like FP8 artifacts, OOM crash after clip 2-3 during VAE decode"
+      total_wall_time: "~35–45 seconds per clip (but unreliable)"
+    a40_current:
+      note: "CURRENT PRODUCTION — A40 48 GB, native BF16, CPU offloading"
+      model: "Wan-AI/Wan2.2-T2V-A14B-Diffusers (native BF16)"
+      text_encoding: "~15–20s (UMT5-XXL loaded in 4-bit NF4 on GPU, freed after encoding)"
+      gpu_diffusion_loop: "~40–50s (20 steps × 2–2.5s/step, native BF16, Ampere sm_86)"
+      cpu_offload_transfers: "~5–8s overhead per clip (expert swap CPU↔GPU between steps)"
+      total_wall_time: "~50–65 seconds per clip"
+      quality: "Cinematic BF16 — no quantization artifacts, both experts run, 720p output"
+      scheduler_shift: "5.0 (correct for 720p resolution geometry)"
+      full_13_clip_run: "~13–15 minutes"
+
+# =============================================================================
+# LOCAL GENERATOR (src/generators/local.py)
+# =============================================================================
+
+local_generator:
+  class: "LocalGenerator"
+  role: |
+    The bridge between the pipeline on the local PC and gpu_server.py on RunPod.
+    Manages the full request lifecycle: start pod → wait for ready → submit job
+    → poll status → download result.
+  ready_polling:
+    max_wait: "1200 seconds (20 minutes)"
+    interval: "15 seconds"
+    behavior: |
+      Polls /ready until 200 OK. Caches readiness in self._model_ready so
+      subsequent clips in the same run skip the /ready polling entirely.
+  job_polling:
+    max_wait: "3600 seconds (60 minutes)"
+    interval: "20 seconds"
+  result_download: |
+    GET /result/{job_id} returns raw MP4 bytes.
+    Written directly to data/runs/<stamp>/clips/clip_{n}.mp4.
+
+# =============================================================================
+# LOCAL INFRASTRUCTURE
+# =============================================================================
+
+local_infrastructure:
+  os: "Linux (Ubuntu)"
+  dashboard:
+    tech: "FastAPI + Jinja2 + Vanilla CSS + SQLite"
+    port: 8080
+    start_command: "scripts/run_dashboard.sh"
+    log: "data/dashboard.log"
+    features:
+      - "Live pipeline progress view (polls /api/runs/{id}/events every 5s)"
+      - "Per-clip provider/timing display"
+      - "Account management (API keys per provider)"
+      - "Usage analytics and cost tracking"
+      - "RunPod pod status widget"
+      - "Manual generate/stop controls"
+
+  database:
+    engine: "SQLite"
+    path: "data/state.db"
+    tables:
+      posts: "One row per video run — title, theme, file paths, publish URLs"
+      credits: "Free-tier credit tracking per provider per period"
+      generations: "Every clip generation attempt — provider, duration, cost, status"
+      accounts: "Dashboard-managed API keys per provider"
+      events: "Real-time pipeline events for dashboard live view"
+      api_logs: "Full request/response logs for all external API calls"
+    auto_migrations:
+      - "Rename legacy 'Colab' account labels → 'GPU VPS' on startup"
+      - "Delete deprecated 'pixabay' provider accounts on startup"
+
+  key_env_vars:
+    RUNPOD_API_KEY: "RunPod REST API authentication token"
+    RUNPOD_POD_ID: "Target pod ID (e.g. j3hdyt7zjugl78) — MUST be updated after pod migration"
+    RUNPOD_NETWORK_VOLUME_ID: "Persistent volume ID (e.g. j7a4lou0dd) — for reference only"
+    LOCAL_GENERATOR_URL: "Optional: override the proxy URL (e.g. for testing with a local server)"
+    GEMINI_API_KEY: "Primary Gemini key for scriptwriter"
+    JAMENDO_CLIENT_ID: "Jamendo music API key"
+    FREESOUND_API_KEY: "Freesound SFX API key"
+
+# =============================================================================
+# AUDIO & MUSIC
+# =============================================================================
+
+audio:
+  bgm:
+    engine: "Jamendo API (theme-aware search)"
+    type: "Royalty-free, cinematic orchestration"
+    cache: "cache/music/ — keyed by theme hash to avoid duplicate downloads"
+    selection: "Searches by theme keywords, picks track closest to required duration"
+  sfx:
+    engine: "SFXPicker (multi-provider)"
+    providers:
+      - "Freesound API — royalty-free ambient sound previews (primary)"
+      - "ElevenLabs Sound Effects API — AI-generated SFX"
+      - "MMAudio via Replicate — synchronized video-to-audio Foley"
+    cache: "cache/sfx/ — MD5 hash of (query + duration) to minimize API cost"
+    timing: "Each SFX is placed at the scene's start_sec timestamp in the final mix"
+  narration:
+    engine: "Edge-TTS (Microsoft, free)"
+    voice: "en-US-ChristopherNeural"
+    status: "DISABLED — BGM-only mode. Kept in codebase for future re-enablement."
+  captions:
+    engine: "faster-whisper (CPU transcription)"
+    status: "DISABLED — follows narration status. Falls back to script-based .ass generation."
+
+# =============================================================================
+# VIDEO COMPOSITION
+# =============================================================================
+
+editor:
+  engine: "FFmpeg 6.x"
+  input: |
+    - Raw AI clip MP4s (from /clips)
+    - Narration audio (if enabled)
+    - BGM audio file (from Jamendo)
+    - Per-scene SFX files with timestamps
+    - Outro image (auto-generated gradient PNG)
+  output_formats:
+    horizontal: "1920×1080 (16:9) — YouTube long-form, Facebook"
+    vertical: "1080×1920 (9:16) — Threads, TikTok, Instagram Reels, YouTube Shorts"
+  features:
+    - "Configurable clip transitions (fade, cut, etc.) with configurable duration"
+    - "Scene-synchronized SFX pre-mixing via adelay/amix"
+    - "Loudness normalization to -14 LUFS (configurable)"
+    - "Auto-split vertical videos ≥ 60s into Part 1 & Part 2 (lossless stream copy)"
+    - "Outro card appended (2s gradient image with branding)"
+
+# =============================================================================
+# PUBLISHING
+# =============================================================================
+
+publisher:
+  engine: "PublishCoordinator"
+  strategy:
+    horizontal: "→ YouTube long-form + Facebook"
+    vertical_full: "→ Threads"
+    vertical_part1: "→ YouTube Shorts + TikTok + Instagram Reels"
+    vertical_part2: "→ YouTube Shorts + TikTok + Instagram Reels"
+  aggregator_apis:
+    - "upload.post (default)"
+    - "postproxy.io"
+    - "bundle.social"
+  native_fallbacks:
+    youtube: "YouTube Data API v3"
+    meta: "Meta Graph API (Facebook/Instagram/Threads)"
+    tiktok: "TikTok Posting API"
+
+# =============================================================================
+# KNOWN ISSUES & PERFORMANCE NOTES
+# =============================================================================
+
+known_issues:
+
+  text_encoder_ram_spike: |
+    The UMT5-XXL text encoder is loaded dynamically per clip in 4-bit NF4 quantization
+    (~6 GB RAM, down from 22 GB BF16) to keep system RAM low during diffusion/VAE decode.
+    The 4-bit text encoding is slightly less precise than BF16, but the visual difference
+    is imperceptible in practice. This is the correct trade-off for stable multi-clip runs.
+    If you observe prompt-following issues, switch to BF16 text encoder by removing the
+    BitsAndBytesConfig from the dynamic loading section in gpu_server.py.
+
+  fp8_model_cache_cleanup: |
+    If migrating from RTX 4090 (FP8 model), delete the stale FP8 cache on the volume
+    to recover ~30 GB of storage:
+      ssh <pod> "rm -rf /workspace/huggingface/hub/models--nvidia--Wan2.2-T2V-A14B-Diffusers-FP8"
+
+  pod_migration_after_migration: |
+    When RunPod migrates your pod to a new host:
+    1. The pod ID may change (check RunPod console).
+    2. Update RUNPOD_POD_ID in .env with the new pod ID.
+    3. Restart the dashboard to reload .env settings.
+    4. The SSH bootstrap will automatically start gpu_server.py on the new host.
+    5. Model weights and venv persist on the network volume — no re-download needed.
+
+  bootstrap_timing: |
+    The SSH bootstrap fires AFTER the pod reaches RUNNING status in the RunPod API.
+    However, the SSH daemon on the container may take an additional 10-30 seconds
+    to start accepting connections after the API reports RUNNING. The bootstrap
+    polls TCP port 22 every 2 seconds (60s timeout) to handle this race condition.
+
+  venv_first_boot: |
+    This mainly applies to fallback/manual environments. In the custom H200 image
+    path, dependencies are preinstalled and gpu_server.py skips the slow pip
+    bootstrap. If the server is run outside that image, it may still create
+    /root/venv and spend 3-5 minutes installing dependencies before first use.
+
+# =============================================================================
+# OPERATIONAL RUNBOOK
+# =============================================================================
+
+runbook:
+
+  start_dashboard: |
+    kill $(lsof -ti:8080) 2>/dev/null || true
+    nohup scripts/run_dashboard.sh >> data/dashboard.log 2>&1 &
+
+  check_gpu_server_log: |
+    ssh -o StrictHostKeyChecking=no -o BatchMode=yes -p {PORT} root@{IP} \
+      "tail -n 20 /workspace/gpu_server.log"
+
+  manually_start_gpu_server: |
+    ssh -o StrictHostKeyChecking=no -o BatchMode=yes -p {PORT} root@{IP} \
+      "nohup python3 /workspace/gpu_server.py >> /workspace/gpu_server.log 2>&1 &"
+
+  check_model_ready: |
+    curl https://{pod_id}-8000.proxy.runpod.net/ready
+
+  after_pod_migration:
+    - "1. Find new pod ID in RunPod console."
+    - "2. Update RUNPOD_POD_ID={new_id} in .env"
+    - "3. Restart dashboard (see start_dashboard above)"
+    - "4. Click Generate — SSH bootstrap handles the rest automatically."
+
+  run_quick_test: |
+    # Triggers a 3-clip quick run from the dashboard UI
+    # Or from CLI:
+    .venv/bin/python -m src.pipeline --quick-run
+
+  run_tests: |
+    .venv/bin/python -m pytest
+
+# =============================================================================
+# PRODUCER-CONSUMER BATCH QUEUE SYSTEM DESIGN (v3.6.0)
+# =============================================================================
+batch_queue_system:
+  goal: |
+    Eliminate the redundant 4-minute pod cold-start/warmup cost per video by keeping
+    the pod running continuously across a batch of script generations, shutting it down
+    only when all script visual clips are generated.
+  
+  architecture: |
+    Uses a multi-threaded Producer-Consumer pattern:
+    1. GPU Thread (Producer): Processes the database queue sequentially. Keeps the GPU pod
+       alive between scripts, generating clips for video 1, then video 2, etc. Shuts the pod
+       down immediately once the clip queue is completely empty.
+    2. Local Thread (Consumer): Processes post-production (audio mixing, FFmpeg composition,
+       publishing) locally in parallel. If the GPU thread finishes a script's clips while the
+       local thread is still compiling the previous video, those clips wait in a queue.
+  
+  database_table: |
+    script_queue:
+      columns:
+        - id: "INTEGER PRIMARY KEY AUTOINCREMENT"
+        - created_at: "TEXT NOT NULL"
+        - title: "TEXT NOT NULL"
+        - theme: "TEXT"
+        - script_json: "TEXT NOT NULL"
+        - status: "TEXT NOT NULL DEFAULT 'queued' (queued|clipping|clips_ready|processing|done|failed)"
+        - run_id: "TEXT"
+        - position: "INTEGER NOT NULL"
+
+  key_modifications:
+    pipeline_split: |
+      Split pipeline.run() into two distinct execution phases:
+      1. run_clip_phase(): Script parsing + RunPod generator rendering (keeps pod alive).
+      2. run_post_phase(): Audio retrieval + FFmpeg rendering + platform publishing.
+    generator_cache: |
+      Store a module-level `_ready_cache` dictionary (base_url -> bool) in local.py so
+      subsequent generators skip the 15-30s /ready HTTP polling once the pod is ready.
+    dashboard_ui: |
+      Add a "Batch Queue" panel with visual queue tracking, queue additions/clearing,
+      and a "Run Batch" button on the Generate page.
+

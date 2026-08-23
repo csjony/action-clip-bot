@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}Generate Video — Action Clip Bot{% endblock %}
+{% block content %}
+<h1>Generate Video</h1>
+<p class="muted" style="margin-bottom: 2rem;">Paste a manually generated script JSON block to render scenes on the GPU server, find background music, and assemble the final clip.</p>
+
+{% if is_busy %}
+<div class="card card-warn">
+  <h3>⚠️ Execution Run Active</h3>
+  <p style="margin-bottom: 1rem;">The pipeline is currently processing another video. Please wait for it to complete or monitor progress.</p>
+  <a href="/runs/{{ current_run_id }}" class="btn btn-primary">View Active Run Status →</a>
+</div>
+{% else %}
+<div class="card">
+  <h3 style="margin-bottom: 1.25rem;">🚀 Launch New Automation Run</h3>
+  
+  {% if error %}
+  <div style="background-color: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem; font-size: 0.9rem;">
+    <strong>⚠️ Error:</strong> {{ error }}
+  </div>
+  {% endif %}
+
+  <!-- STEP 1: Prompt Retrieval -->
+  <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); padding: 1.25rem; border-radius: 8px; margin-bottom: 2rem;">
+    <h4 style="margin-top: 0; margin-bottom: 0.5rem; color: #6366f1;">Step 1: Choose Theme & Get Prompt</h4>
+    <p class="muted" style="font-size: 0.85rem; margin-bottom: 1rem;">Select a theme, copy the prompt from the <strong>instructions</strong> box below, and paste it into ChatGPT, Gemini, or Claude to get your script JSON.</p>
+    
+    <div class="form-row">
+      <label>Select Script Theme
+        <select id="theme_selector" style="margin-bottom: 1rem;">
+          {% for t in themes %}
+          <option value="{{ t }}">{{ t | replace('_', ' ') | title }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    
+    <div class="form-row">
+      <label>Instructions Prompt (Copy and Paste to ChatGPT/Gemini/Claude)
+        <div style="position: relative; margin-top: 0.5rem;">
+          <textarea id="instructions_box" readonly rows="12" style="font-family: monospace; font-size: 0.85rem; width: 100%; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); padding: 0.75rem; background: rgba(0,0,0,0.3); color: #ccc; box-sizing: border-box; resize: vertical;"></textarea>
+          <button id="copy_prompt_btn" type="button" style="position: absolute; right: 10px; top: 10px; padding: 4px 8px; font-size: 0.75rem; background: #6366f1; border: none; color: #fff; border-radius: 4px; cursor: pointer; transition: background 0.2s;">Copy Prompt</button>
+        </div>
+      </label>
+    </div>
+  </div>
+
+  <!-- STEP 2: Paste JSON and submit -->
+  <form method="post">
+    <!-- hidden field to keep track of the selected theme -->
+    <input type="hidden" name="theme" id="hidden_theme" value="{{ themes[0] if themes else '' }}">
+    
+    <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); padding: 1.25rem; border-radius: 8px; margin-bottom: 1.5rem;">
+      <h4 style="margin-top: 0; margin-bottom: 0.5rem; color: #10b981;">Step 2: Paste Generated Script JSON</h4>
+      <p class="muted" style="font-size: 0.85rem; margin-bottom: 1rem;">Paste the raw JSON block returned by the LLM into the box below.</p>
+      
+      <div class="form-row">
+        <textarea name="script_json" rows="12" placeholder='Paste your ChatGPT/Gemini/Claude output JSON here...' style="font-family: monospace; font-size: 0.85rem; width: 100%; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); padding: 0.75rem; background: rgba(0,0,0,0.2); color: #fff; box-sizing: border-box;">{{ script_json or "" }}</textarea>
+      </div>
+    </div>
+    
+    <div class="form-row" style="margin-top: 1.5rem; padding: 1rem; background: rgba(99,102,241,0.08); border-radius: 8px; border: 1px solid rgba(99,102,241,0.25);">
+      <label style="flex-direction: row; align-items: flex-start; gap: 0.75rem; cursor: pointer;">
+        <input type="checkbox" name="quick_test" id="quick_test" style="width: auto; margin: 0.2rem 0 0 0; flex-shrink: 0;">
+        <span>
+          <strong>⚡ Quick Test Mode</strong> — GPU VPS smoke-test<br>
+          <span class="muted" style="font-size: 0.85rem;">Generates <strong>3 clips × 5s</strong> each (~15s total output). Implies Dry Run. Use this to confirm your GPU VPS tunnel is working before launching a full run.</span>
+        </span>
+      </label>
+    </div>
+    
+    <div style="margin-top: 1.75rem;">
+      <button type="submit" class="btn btn-primary">🚀 Start Generation Pipeline</button>
+    </div>
+  </form>
+</div>
+
+<script>
+  // Prompts dictionary rendered from python
+  const promptsMap = {{ prompts | tojson }};
+  
+  const themeSelector = document.getElementById('theme_selector');
+  const instructionsBox = document.getElementById('instructions_box');
+  const copyBtn = document.getElementById('copy_prompt_btn');
+  const hiddenThemeInput = document.getElementById('hidden_theme');
+
+  function updatePrompt() {
+    const selectedTheme = themeSelector.value;
+    instructionsBox.value = promptsMap[selectedTheme] || '';
+    hiddenThemeInput.value = selectedTheme;
+  }
+
+  themeSelector.addEventListener('change', updatePrompt);
+  
+  // Initial load
+  updatePrompt();
+
+  // Copy prompt helper
+  copyBtn.addEventListener('click', () => {
+    instructionsBox.select();
+    document.execCommand('copy');
+    copyBtn.innerText = 'Copied!';
+    setTimeout(() => {
+      copyBtn.innerText = 'Copy Prompt';
+    }, 2000);
+  });
+</script>
+{% endif %}
+{% endblock %}
