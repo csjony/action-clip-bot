@@ -44,6 +44,13 @@ MUSIC_DIR   = Path(__file__).resolve().parent.parent.parent / "templates" / "mus
 CACHE_DIR   = Path(__file__).resolve().parent.parent.parent / "data" / "music_cache"
 JAMENDO_API = "https://api.jamendo.com/v3.0/tracks/"
 
+
+def _music_cfg() -> dict:
+    """Network/retry tunables from settings.yaml `music:` (dashboard-editable)."""
+    from src.config import get_settings
+    cfg = get_settings().get("music", {}) or {}
+    return cfg if isinstance(cfg, dict) else {}
+
 # Jamendo order strategy:
 # popularity_month → currently trending this month (best for algorithm boost)
 # popularity_total → all-time most played (reliable quality fallback)
@@ -84,14 +91,24 @@ _THEME_QUERIES: dict[str, list[str]] = {
 
 
 def _resolve_queries(theme: str) -> list[str]:
-    """Map a theme string to an ordered list of Jamendo search queries."""
-    if theme in _THEME_QUERIES:
-        return _THEME_QUERIES[theme]
+    """Map a theme string to an ordered list of Jamendo search queries.
+
+    Dashboard-saved `music.theme_queries` entries extend/override the
+    builtin map so moods can change without code edits.
+    """
+    extra = _music_cfg().get("theme_queries") or {}
+    table = dict(_THEME_QUERIES)
+    if isinstance(extra, dict):
+        for k, v in extra.items():
+            if isinstance(v, list) and v:
+                table[str(k)] = [str(q) for q in v]
+    if theme in table:
+        return table[theme]
     # Try partial match — e.g. "urban_heist_2025" → "heist"
-    for key in _THEME_QUERIES:
+    for key in table:
         if key != "_default" and key in theme.lower():
-            return _THEME_QUERIES[key]
-    return _THEME_QUERIES["_default"]
+            return table[key]
+    return table["_default"]
 
 
 class MusicPicker:
@@ -171,7 +188,8 @@ class MusicPicker:
         if not fallback.exists():
             log.info("Generating synthetic action pulse BGM...")
             try:
-                self._generate_action_pulse(fallback, max(int(duration_sec) + 10, 120))
+                synth_floor = int(_music_cfg().get("min_synth_sec", 120))
+                self._generate_action_pulse(fallback, max(int(duration_sec) + 10, synth_floor))
             except Exception as exc:
                 log.warning("Fallback BGM generation failed: %s", exc)
                 return None
@@ -195,8 +213,10 @@ class MusicPicker:
 
         Returns the local cache path on success, None otherwise.
         """
+        cfg = _music_cfg()
         queries = _resolve_queries(theme)
-        min_dur = max(duration_sec - 10, 30)  # allow slightly shorter tracks
+        slack = int(cfg.get("duration_slack_sec", 10))
+        min_dur = max(duration_sec - slack, int(cfg.get("min_duration_sec", 30)))  # allow slightly shorter tracks
 
         # Strategy: try trending first, then popular, across all queries.
         # This mirrors the "native platform trending audio" approach.
@@ -227,10 +247,11 @@ class MusicPicker:
         self, tags_query: str, order: str, min_dur: int
     ) -> Path | None:
         """Execute a single Jamendo API search and return the cached track path."""
+        cfg = _music_cfg()
         params = urllib.parse.urlencode({
             "client_id":   self._jamendo_id,
             "format":      "json",
-            "limit":       15,
+            "limit":       int(cfg.get("page_size", 15)),
             "fuzzytags":   tags_query,   # fuzzytags gives broader matches
             "audioformat": "mp32",       # guaranteed 320 kbps MP3 download
             "order":       order,
@@ -240,7 +261,7 @@ class MusicPicker:
 
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "action-clip-bot/2.0"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=float(cfg.get("legacy_timeout_sec", 15))) as resp:
                 data = json.loads(resp.read())
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Jamendo network error: {exc}") from exc
@@ -277,8 +298,9 @@ class MusicPicker:
         )
 
         # Check cache first
+        cfg = _music_cfg()
         cache_path = CACHE_DIR / f"jamendo_{track_id}.mp3"
-        if cache_path.exists() and cache_path.stat().st_size > 50_000:
+        if cache_path.exists() and cache_path.stat().st_size > int(cfg.get("min_bytes", 50_000)):
             log.info("Jamendo cache hit: %s", cache_path.name)
             return cache_path
 
@@ -297,9 +319,16 @@ class MusicPicker:
             "User-Agent": "action-clip-bot/2.0",
             "Accept":     "audio/mpeg, audio/*, */*",
         }
-        _timeout = httpx.Timeout(connect=10.0, read=15.0, write=10.0, pool=10.0)
+        cfg = _music_cfg()
+        _timeout = httpx.Timeout(
+            connect=float(cfg.get("connect_timeout_sec", 10)),
+            read=float(cfg.get("read_timeout_sec", 15)),
+            write=float(cfg.get("write_timeout_sec", 10)),
+            pool=float(cfg.get("pool_timeout_sec", 10)),
+        )
+        retries = int(cfg.get("retries", 3))
 
-        for attempt in range(3):
+        for attempt in range(retries):
             try:
                 with httpx.Client(timeout=_timeout, follow_redirects=True) as client:
                     with client.stream("GET", url, headers=headers) as resp:
@@ -309,11 +338,11 @@ class MusicPicker:
                         # Write stream chunk by chunk
                         temp_dest = dest.with_suffix(".tmp_bgm")
                         with open(temp_dest, "wb") as f:
-                            for chunk in resp.iter_bytes(chunk_size=65536):
+                            for chunk in resp.iter_bytes(chunk_size=int(cfg.get("chunk_bytes", 65536))):
                                 f.write(chunk)
                         
                         file_size = temp_dest.stat().st_size
-                        if file_size < 50_000:
+                        if file_size < int(cfg.get("min_bytes", 50_000)):
                             temp_dest.unlink(missing_ok=True)
                             raise RuntimeError(f"Downloaded file too small ({file_size} bytes)")
                         
@@ -325,8 +354,8 @@ class MusicPicker:
                         return dest
             except Exception as exc:
                 log.warning("Jamendo download attempt %d failed: %s", attempt + 1, exc)
-                if attempt < 2:
-                    time.sleep(2 ** attempt)
+                if attempt < retries - 1:
+                    time.sleep(int(cfg.get("backoff_base_sec", 2)) ** attempt)
         return None
 
     # ---------------------------------------------------------------------- #

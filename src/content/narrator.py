@@ -14,16 +14,25 @@ log = logging.getLogger(__name__)
 
 # en-US-ChristopherNeural — deep, authoritative, cinematic American male.
 # Best Edge-TTS voice for action/sports/drama narration.
+# Defaults below are fallbacks; live values come from settings.yaml `tts:`
+# (dashboard-editable) so voices can change without code edits.
 DEFAULT_VOICE = "en-US-ChristopherNeural"
 ALT_VOICE = "en-US-GuyNeural"          # alternative deep male voice
 
 
+def _tts_defaults() -> dict:
+    from src.config import get_settings
+    cfg = get_settings().get("tts", {}) or {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
 class Narrator:
-    def __init__(self, voice: str = DEFAULT_VOICE, rate: str = "+4%",
-                 pitch: str = "+2Hz") -> None:
-        self.voice = voice
-        self.rate = rate        # slight speed boost for urgency without sounding robotic
-        self.pitch = pitch      # tiny pitch bump adds energy
+    def __init__(self, voice: str | None = None, rate: str | None = None,
+                 pitch: str | None = None) -> None:
+        cfg = _tts_defaults()
+        self.voice = voice or str(cfg.get("voice", DEFAULT_VOICE))
+        self.rate = rate or str(cfg.get("rate", "+4%"))        # slight speed boost for urgency without sounding robotic
+        self.pitch = pitch or str(cfg.get("pitch", "+2Hz"))    # tiny pitch bump adds energy
 
     def synthesize(self, text: str, out_path: Path | str) -> Path:
         """Render `text` to an MP3 file at out_path. Returns the path."""

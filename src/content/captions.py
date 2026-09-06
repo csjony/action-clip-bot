@@ -24,9 +24,18 @@ class CaptionSegment:
 
 
 class Captioner:
-    def __init__(self, model_size: str = "base") -> None:
+    def __init__(self, model_size: str | None = None) -> None:
+        if model_size is None:
+            from src.config import get_settings
+            model_size = str(get_settings().whisper_model)
         self.model_size = model_size
         self._model = None  # lazy-loaded
+
+    @staticmethod
+    def _whisper_cfg() -> dict:
+        from src.config import get_settings
+        cfg = get_settings().get("whisper", {}) or {}
+        return cfg if isinstance(cfg, dict) else {}
 
     def _load(self):
         if self._model is None:
@@ -34,8 +43,14 @@ class Captioner:
             # want at module-import time (e.g. for unit tests).
             from faster_whisper import WhisperModel  # type: ignore
 
-            log.info("Loading whisper model '%s' (CPU)...", self.model_size)
-            self._model = WhisperModel(self.model_size, device="cpu", compute_type="int8")
+            cfg = self._whisper_cfg()
+            log.info("Loading whisper model '%s' (%s)...",
+                     self.model_size, cfg.get("device", "cpu"))
+            self._model = WhisperModel(
+                self.model_size,
+                device=str(cfg.get("device", "cpu")),
+                compute_type=str(cfg.get("compute_type", "int8")),
+            )
         return self._model
 
     def transcribe(self, audio_path: Path | str) -> list[CaptionSegment]:
@@ -44,9 +59,12 @@ class Captioner:
         if not audio_path.exists():
             raise FileNotFoundError(audio_path)
 
+        cfg = self._whisper_cfg()
         model = self._load()
         segments_gen, _info = model.transcribe(
-            str(audio_path), word_timestamps=False, vad_filter=True,
+            str(audio_path),
+            word_timestamps=bool(cfg.get("word_timestamps", False)),
+            vad_filter=bool(cfg.get("vad_filter", True)),
         )
         out: list[CaptionSegment] = []
         for seg in segments_gen:

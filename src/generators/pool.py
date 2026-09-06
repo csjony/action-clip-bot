@@ -54,6 +54,31 @@ _DEFAULT_CAPS = {
 }
 
 
+def _credit_spec(providers_config: dict, provider_key: str) -> tuple[str, int]:
+    """(kind, cap) for a provider.
+
+    Precedence: settings.yaml `credits:` (dashboard-editable) →
+    providers.yaml `credits:` → built-in default.
+    """
+    try:
+        from src.config import get_settings
+        settings_cred = (get_settings().get("credits", {}) or {}).get(provider_key) or {}
+    except Exception:
+        settings_cred = {}
+    spec = (providers_config.get("providers", {}) or {}).get(provider_key, {}) or {}
+    file_cred = spec.get("credits") or {}
+    default = _DEFAULT_CAPS.get(provider_key, {})
+    cred = dict(default)
+    cred.update({k: v for k, v in file_cred.items() if v is not None})
+    cred.update({k: v for k, v in settings_cred.items() if v is not None})
+    kind = str(cred.get("kind", "daily"))
+    try:
+        cap = int(cred.get("cap", 1_000_000))
+    except (TypeError, ValueError):
+        cap = 1_000_000
+    return kind, cap
+
+
 @dataclass
 class BudgetExceeded(Exception):
     """Raised when no clip could be produced without breaching the budget."""
@@ -301,9 +326,7 @@ class GeneratorPool:
 
             # --- FREE providers: respect the credit ledger ------------------
             if provider.is_free:
-                cap_spec = _DEFAULT_CAPS.get(provider.provider_key, {})
-                cap = cap_spec.get("cap", 1_000_000)
-                kind = cap_spec.get("kind", "daily")
+                kind, cap = _credit_spec(self.cfg, provider.provider_key)
                 if self.store.credit_remaining(provider.provider_key, kind, cap) <= 0:
                     log.info("skip %s (free credits exhausted for this period)",
                              provider.name)
@@ -401,9 +424,7 @@ class GeneratorPool:
                 cost_usd=result.cost_usd,
             )
             if provider.is_free:
-                cap_spec = _DEFAULT_CAPS.get(provider.provider_key, {})
-                cap = cap_spec.get("cap", 1_000_000)
-                kind = cap_spec.get("kind", "daily")
+                kind, cap = _credit_spec(self.cfg, provider.provider_key)
                 self.store.consume_credit(provider.provider_key, kind, cap=cap)
             if bus is not None:
                 bus.provider_ok(

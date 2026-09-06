@@ -60,6 +60,7 @@ class Pipeline:
     # Number of clips / clip duration used in quick-run mode.
     # 3 clips × 5s = 15s total output video — fast enough to verify the GPU
     # pipeline end-to-end without burning 130+ minutes on a full 13-scene run.
+    # Tunable without code edits via settings.yaml `quickrun:` (or dashboard).
     _QUICK_TEST_CLIPS = 3
     _QUICK_TEST_CLIP_SEC = 5
 
@@ -90,6 +91,9 @@ class Pipeline:
         self.run_dir = Path(self.settings.data_dir) / "runs" / stamp
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.post_id: int | None = None
+        # Quick-run shape comes from settings (class attrs are the fallback).
+        self.quick_clips = int(self.settings.get("quickrun.clips", self._QUICK_TEST_CLIPS))
+        self.quick_clip_sec = int(self.settings.get("quickrun.clip_sec", self._QUICK_TEST_CLIP_SEC))
 
     # ------------------------------------------------------------- pod control
     def _stop_runpod_if_configured(self) -> None:
@@ -112,7 +116,8 @@ class Pipeline:
     def _preflight_budget_check(self) -> None:
         spend = self.store.monthly_spend_usd()
         cap = self.settings.budget_cap_usd
-        if cap > 0 and spend >= cap * 0.8:
+        warn_pct = float(self.settings.get("budget_warning_pct", 80))
+        if cap > 0 and spend >= cap * warn_pct / 100:
             self.notifier.notify_budget_warning(
                 monthly_spend_usd=spend, budget_cap_usd=cap)
 
@@ -148,11 +153,11 @@ class Pipeline:
                 )
             
             if self.quick_test:
-                log.info("Quick test mode: trimming scenes to first 3 clips")
-                plan.scenes = plan.scenes[:3]
+                log.info("Quick test mode: trimming scenes to first %d clips", self.quick_clips)
+                plan.scenes = plan.scenes[:self.quick_clips]
                 # Also adjust durations for a quick test (5s per clip)
                 for s in plan.scenes:
-                    s.duration_sec = 5
+                    s.duration_sec = self.quick_clip_sec
                 
             log.info("plan: %s (%d scenes, %ds)",
                      plan.title, len(plan.scenes), plan.total_duration_sec)
@@ -165,11 +170,11 @@ class Pipeline:
 
         scenes = plan.scenes
         if self.quick_test:
-            scenes = scenes[: self._QUICK_TEST_CLIPS]
+            scenes = scenes[: self.quick_clips]
             log.info(
                 "quick_test mode — capping to %d clips × %ds each (~%ds total)",
-                len(scenes), self._QUICK_TEST_CLIP_SEC,
-                len(scenes) * self._QUICK_TEST_CLIP_SEC,
+                len(scenes), self.quick_clip_sec,
+                len(scenes) * self.quick_clip_sec,
             )
 
         total = len(scenes)
@@ -206,7 +211,7 @@ class Pipeline:
                 )
                 result = pool.generate(
                     prompt=scene.prompt,
-                    duration_sec=self._QUICK_TEST_CLIP_SEC if self.quick_test else scene.duration_sec,
+                    duration_sec=self.quick_clip_sec if self.quick_test else scene.duration_sec,
                     out_dir=clips_dir,
                     post_id=post_id,
                     scene_index=scene.index,
@@ -354,10 +359,12 @@ class Pipeline:
     def _fallback_audio(out_path: Path, duration_sec: int) -> None:
         """Generate a silent mp3 via ffmpeg when Edge-TTS is unavailable."""
         import subprocess
+        from src.config import get_settings as _get_settings
+        rate = int(_get_settings().get("pipeline.fallback_sample_rate", 44100))
         out_path.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-             "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+             "-f", "lavfi", "-i", f"anullsrc=channel_layout=stereo:sample_rate={rate}",
              "-t", str(duration_sec), "-c:a", "libmp3lame", str(out_path)],
             check=True,
         )
@@ -365,10 +372,11 @@ class Pipeline:
     @staticmethod
     def _fallback_captions(text: str, out_path: Path) -> Path:
         """Build a single-block .ass from the narration text when Whisper is unavailable."""
+        from src.config import get_settings as _get_settings
         from src.content.captions import Captioner, CaptionSegment
         # Split text into ~5-second chunks at sentence boundaries.
         sentences = [s.strip() for s in text.replace("!", ".").replace("?", ".").split(".") if s.strip()]
-        chunk_dur = 5.0
+        chunk_dur = float(_get_settings().get("pipeline.caption_chunk_sec", 5.0))
         segs = []
         t = 0.0
         for sent in sentences:
@@ -393,7 +401,7 @@ class Pipeline:
             v_cfg = render_cfg.get("vertical", {"width": 1080, "height": 1920})
             h_cfg = render_cfg.get("horizontal", {"width": 1920, "height": 1080})
             result = Editor(
-                fps=24,  # Force 24fps output for monetization standards (16fps generated clips are interpolated)
+                fps=int(self.settings.get("pipeline.output_fps", 24)),  # monetization-standard output fps
                 loudness_lufs=self.settings.video.get("loudness_lufs", -14.0),
                 outro_duration_sec=self.settings.video.get("outro_duration_sec", 2.0),
                 vertical=(int(v_cfg.get("width", 1080)), int(v_cfg.get("height", 1920))),

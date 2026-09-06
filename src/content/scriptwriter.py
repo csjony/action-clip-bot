@@ -82,7 +82,7 @@ class GeminiBackend:
                 contents=system_prompt,
                 config=types.GenerateContentConfig(
                     system_instruction="You output ONLY valid JSON. No markdown fences.",
-                    temperature=0.9,
+                    temperature=float(_llm_tuning().get("temperature", 0.9)),
                     response_mime_type="application/json",
                 ),
             )
@@ -139,7 +139,7 @@ class GroqBackend:
                     },
                     json={
                         "model": self.model,
-                        "temperature": 0.9,
+                        "temperature": float(_llm_tuning().get("temperature", 0.9)),
                         "messages": [
                             {"role": "system",
                              "content": "You output ONLY valid JSON. No markdown fences."},
@@ -228,6 +228,13 @@ class OfflineBackend:
 
 
 # ----------------------------------------------------------- orchestration
+def _llm_tuning() -> dict:
+    """Creativity/retry tunables from settings.yaml `llm_tuning:` (dashboard-editable)."""
+    from src.config import get_settings as _get_settings
+    cfg = _get_settings().get("llm_tuning", {}) or {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
 class Scriptwriter:
     """Picks a theme, renders the system prompt, parses LLM output into a plan."""
 
@@ -241,7 +248,9 @@ class Scriptwriter:
         as per user requirements. Only OfflineBackend is retained as a local fallback.
         """
         backends: list[LLMBackend] = []
-        backends.append(OfflineBackend(scene_duration=self.settings.video.get("scene_duration_sec", 6)))
+        backends.append(OfflineBackend(scene_duration=int(_llm_tuning().get(
+            "scene_duration_sec",
+            self.settings.video.get("scene_duration_sec", 6)))))
         log.debug("Scriptwriter backends (1): OfflineBackend (LLM generation disabled)")
         return backends
 
@@ -255,7 +264,7 @@ class Scriptwriter:
             theme=theme,
             scene_count=scene_count,
             target_duration=target_duration,
-            word_budget=int(target_duration * 2.5),
+            word_budget=int(target_duration * float(_llm_tuning().get("words_per_sec", 2.5))),
         )
 
     def write(self, *, theme: str | None = None,
@@ -277,8 +286,9 @@ class Scriptwriter:
         # seconds for the per-minute quota to reset and then try the whole list again.
         # This handles the case where 24 free-tier keys all get rate-limited within
         # the same 60-second window and ALL would otherwise be wasted in a single pass.
-        MAX_RATE_LIMIT_CYCLES = 3
-        RATE_LIMIT_WAIT_SEC = 65  # slightly over 60s to ensure quota window rolls over
+        tune = _llm_tuning()
+        MAX_RATE_LIMIT_CYCLES = int(tune.get("rate_limit_cycles", 3))
+        RATE_LIMIT_WAIT_SEC = int(tune.get("rate_limit_wait_sec", 65))  # slightly over 60s to ensure quota window rolls over
 
         last_err: Exception | None = None
         for cycle in range(MAX_RATE_LIMIT_CYCLES):

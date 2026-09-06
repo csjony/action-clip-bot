@@ -18,6 +18,12 @@ log = logging.getLogger(__name__)
 API = "https://api.telegram.org/bot{token}/sendMessage"
 
 
+def _notify_cfg() -> dict:
+    """Transport tunables from settings.yaml `notify:` (dashboard-editable)."""
+    cfg = get_settings().get("notify", {}) or {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
 class TelegramNotifier:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
@@ -36,14 +42,15 @@ class TelegramNotifier:
         try:
             import httpx
 
-            with httpx.Client(timeout=15.0) as client:
+            cfg = _notify_cfg()
+            with httpx.Client(timeout=float(cfg.get("timeout_sec", 15.0))) as client:
                 resp = client.post(
-                    API.format(token=self.token),
+                    str(cfg.get("api_url", API)).format(token=self.token),
                     json={
                         "chat_id": self.chat_id,
                         "text": text,
-                        "parse_mode": "Markdown",
-                        "disable_web_page_preview": True,
+                        "parse_mode": str(cfg.get("parse_mode", "Markdown")),
+                        "disable_web_page_preview": bool(cfg.get("preview_disabled", True)),
                     },
                 )
                 resp.raise_for_status()

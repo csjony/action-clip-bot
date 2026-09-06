@@ -17,6 +17,13 @@ class LocalGenerator(VideoGenerator):
     watermark_free = True
     model = "wan2.2-14b"
 
+    @staticmethod
+    def _client_cfg() -> dict:
+        """Polling/timeout tunables from settings.yaml `generator_client:`."""
+        from src.config import get_settings
+        cfg = get_settings().get("generator_client", {}) or {}
+        return cfg if isinstance(cfg, dict) else {}
+
     def __init__(self, server_url: str) -> None:
         # server_url can be passed via the dashboard account key field or config
         super().__init__(env_value=server_url)
@@ -62,8 +69,9 @@ class LocalGenerator(VideoGenerator):
         if not self._model_ready:
             # 40 minutes: Cloud GPU cold-start requires downloading the large 28 GB 14B weights
             # from HuggingFace. This typically takes 15–25 min on first-time runs.
-            max_ready_wait = 2400
-            poll_interval = 15  # seconds between /ready polls
+            cfg = self._client_cfg()
+            max_ready_wait = int(cfg.get("ready_wait_sec", 2400))
+            poll_interval = int(cfg.get("ready_poll_sec", 15))  # seconds between /ready polls
             start_time = time.time()
 
             log.info("Polling local generator /ready (will wait up to %d min)...",
@@ -71,7 +79,7 @@ class LocalGenerator(VideoGenerator):
             while time.time() - start_time < max_ready_wait:
                 elapsed = int(time.time() - start_time)
                 try:
-                    with httpx.Client(headers=headers, timeout=10.0) as client:
+                    with httpx.Client(headers=headers, timeout=float(self._client_cfg().get("ready_timeout_sec", 10.0))) as client:
                         resp = client.get(f"{base_url}/ready")
                         if resp.status_code == 200:
                             self._model_ready = True
@@ -138,7 +146,7 @@ class LocalGenerator(VideoGenerator):
         )
 
         # Dynamic photographic styling enhancement to permanently prevent CGI/gaming look:
-        enhancers = ["photorealistic", "live-action feature film", "shot on 35mm", "organic textures", "raw photograph"]
+        enhancers = list(self._client_cfg().get("prompt_enhancers", []) or [])
         added_enhancers = []
         prompt_lower = prompt.lower()
         
@@ -172,7 +180,7 @@ class LocalGenerator(VideoGenerator):
             payload["negative_prompt"] = negative_prompt
         log.info("Submitting async generation job to local server: %s", url)
 
-        with httpx.Client(headers=headers, timeout=30.0) as client:
+        with httpx.Client(headers=headers, timeout=float(self._client_cfg().get("submit_timeout_sec", 30.0))) as client:
             resp = client.post(url, json=payload)
             if resp.status_code != 200:
                 raise RuntimeError(
@@ -196,16 +204,17 @@ class LocalGenerator(VideoGenerator):
         # Circuit-breaker: 20 consecutive 502 responses (~60s) means the GPU server
         # has crashed (OOM kill, container restart, etc.) — fail fast with a clear error
         # instead of retrying silently for 60 minutes.
-        max_wait = 3600
-        poll_interval = 3
+        cfg = self._client_cfg()
+        max_wait = int(cfg.get("job_wait_sec", 3600))
+        poll_interval = int(cfg.get("job_poll_sec", 3))
         consecutive_502 = 0
-        max_consecutive_502 = 20  # ~60 seconds of server-down before giving up
+        max_consecutive_502 = int(cfg.get("breaker_502_count", 20))  # server-down before giving up
         start = time.time()
         while time.time() - start < max_wait:
             time.sleep(poll_interval)
             elapsed = int(time.time() - start)
             try:
-                with httpx.Client(headers=headers, timeout=15.0) as client:
+                with httpx.Client(headers=headers, timeout=float(self._client_cfg().get("status_timeout_sec", 15.0))) as client:
                     status_resp = client.get(f"{base_url}/status/{job_id}")
                 if status_resp.status_code == 502:
                     consecutive_502 += 1
@@ -249,7 +258,7 @@ class LocalGenerator(VideoGenerator):
 
         # Fetch the result video.
         log.info("Fetching result for job %s...", job_id[:8])
-        with httpx.Client(headers=headers, timeout=120.0) as client:
+        with httpx.Client(headers=headers, timeout=float(self._client_cfg().get("result_timeout_sec", 120.0))) as client:
             result_resp = client.get(f"{base_url}/result/{job_id}")
             if result_resp.status_code != 200:
                 raise RuntimeError(

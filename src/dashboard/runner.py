@@ -58,8 +58,15 @@ class PipelineRunner:
     def get_run(self, run_id: str) -> RunState | None:
         return self._runs.get(run_id)
 
-    def recent_runs(self, limit: int = 20) -> list[RunState]:
+    def recent_runs(self, limit: int | None = None) -> list[RunState]:
         """Most recent runs, newest first (insertion order)."""
+        if limit is None:
+            try:
+                from src.config import get_settings
+                cfg = get_settings().get("dashboard", {}) or {}
+                limit = int(cfg.get("runner_history", 20))
+            except Exception:
+                limit = 20
         return [self._runs[rid] for rid in reversed(self._run_order)
                 if rid in self._runs][:limit]
 

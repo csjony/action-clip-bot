@@ -981,10 +981,14 @@ def get_job_result(job_id: str):
 if __name__ == "__main__":
     # Connectivity is handled by RunPod's native HTTP proxy
     # (https://{pod_id}-8000.proxy.runpod.net) — no tunnels needed.
-    print("Starting GPU server on port 8000...")
+    # Host/port come from the environment so they stay in sync with
+    # settings.yaml runpod.proxy_port without code edits.
+    _host = os.environ.get("GPU_HOST", "0.0.0.0")
+    _port = int(os.environ.get("GPU_PORT", "8000"))
+    print(f"Starting GPU server on {_host}:{_port}...")
     import threading
     server_thread = threading.Thread(
-        target=lambda: uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info"),
+        target=lambda: uvicorn.run(app, host=_host, port=_port, log_level="info"),
         daemon=True
     )
     server_thread.start()

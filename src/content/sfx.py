@@ -7,6 +7,14 @@ import urllib.parse
 
 log = logging.getLogger(__name__)
 
+
+def _sfx_cfg() -> dict:
+    """Timeouts/URLs tunables from settings.yaml `sfx_api:` (dashboard-editable)."""
+    from src.config import get_settings
+    cfg = get_settings().get("sfx_api", {}) or {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
 class SFXPicker:
     def __init__(self, *, freesound_api_key: str | None = None, elevenlabs_api_key: str | None = None, replicate_api_key: str | None = None, provider: str = "freesound", cache_dir: Path | None = None) -> None:
         self.freesound_api_key = freesound_api_key
@@ -84,7 +92,8 @@ class SFXPicker:
 
     def _fetch_elevenlabs(self, query: str, duration_sec: int, dest_path: Path) -> bool:
         import httpx
-        url = "https://api.elevenlabs.io/v1/sound-effects"
+        cfg = _sfx_cfg()
+        url = str(cfg.get("elevenlabs_url", "https://api.elevenlabs.io/v1/sound-effects"))
         headers = {
             "xi-api-key": self.elevenlabs_api_key,
             "Content-Type": "application/json"
@@ -92,9 +101,11 @@ class SFXPicker:
         data = {
             "text": query,
             "duration_seconds": float(duration_sec),
-            "prompt_influence": 0.3
+            "prompt_influence": float(cfg.get("prompt_influence", 0.3))
         }
-        _timeout = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
+        _timeout = httpx.Timeout(connect=float(cfg.get("connect_timeout_sec", 10)),
+                                 read=float(cfg.get("elevenlabs_read_sec", 30)),
+                                 write=10.0, pool=10.0)
         try:
             with httpx.Client(timeout=_timeout) as client:
                 resp = client.post(url, json=data, headers=headers)
@@ -111,16 +122,17 @@ class SFXPicker:
     def _fetch_freesound(self, query: str, duration_sec: int, dest_path: Path) -> bool:
         import httpx
         # 1. Search Freesound
+        cfg = _sfx_cfg()
         params = {
             "query": query,
             "token": self.freesound_api_key,
             "fields": "id,name,previews",
-            "page_size": 1
+            "page_size": int(cfg.get("page_size", 1))
         }
         headers = {"User-Agent": "ActionClipBot/1.0"}
-        search_url = "https://freesound.org/apiv2/search/text/"
+        search_url = str(cfg.get("freesound_url", "https://freesound.org/apiv2/search/text/"))
         try:
-            with httpx.Client(timeout=15.0) as client:
+            with httpx.Client(timeout=float(cfg.get("freesound_search_sec", 15))) as client:
                 resp = client.get(search_url, params=params, headers=headers)
                 if resp.status_code != 200:
                     log.warning("Freesound search failed with status %d: %s", resp.status_code, resp.text)
@@ -142,13 +154,15 @@ class SFXPicker:
         # 2. Download preview — use streaming so a stalled CDN never hangs indefinitely.
         #    httpx.Timeout applies per-chunk, so even if the server sends the 200 header
         #    and then stops sending bytes, we raise ReadTimeout after `read` seconds.
-        _timeout = httpx.Timeout(connect=10.0, read=10.0, write=10.0, pool=10.0)
+        _timeout = httpx.Timeout(connect=float(cfg.get("connect_timeout_sec", 10)),
+                                 read=float(cfg.get("preview_timeout_sec", 10)),
+                                 write=10.0, pool=10.0)
         try:
             with httpx.Client(timeout=_timeout, follow_redirects=True) as client:
                 with client.stream("GET", preview_url, headers=headers) as resp_dl:
                     if resp_dl.status_code == 200:
                         with open(dest_path, "wb") as f:
-                            for chunk in resp_dl.iter_bytes(chunk_size=65536):
+                            for chunk in resp_dl.iter_bytes(chunk_size=int(cfg.get("chunk_bytes", 65536))):
                                 f.write(chunk)
                         log.info("Successfully downloaded Freesound SFX preview for query: %s", query)
                         return True
@@ -181,8 +195,9 @@ class SFXPicker:
             "Content-Type": "application/json"
         }
         
+        cfg = _sfx_cfg()
         payload = {
-            "version": "62871fb59889b2d7c13777f08deb3b36bdff88f7e1d53a50ad7694548a41b484",
+            "version": str(cfg.get("replicate_version", "62871fb59889b2d7c13777f08deb3b36bdff88f7e1d53a50ad7694548a41b484")),
             "input": {
                 "prompt": query,
                 "video": data_uri,
@@ -192,7 +207,9 @@ class SFXPicker:
 
         log.info("Sending prediction request to Replicate for MMAudio V2A...")
         try:
-            with httpx.Client(timeout=30.0) as client:
+            wait_sec = int(cfg.get("replicate_wait_sec", 90))
+            poll_sec = int(cfg.get("replicate_poll_sec", 2))
+            with httpx.Client(timeout=float(cfg.get("replicate_timeout_sec", 30))) as client:
                 resp = client.post(
                     "https://api.replicate.com/v1/predictions",
                     headers=headers,
@@ -208,9 +225,9 @@ class SFXPicker:
                     log.warning("No poll URL in Replicate prediction response")
                     return False
 
-                # Poll prediction status (timeout after 90 seconds)
+                # Poll prediction status until the configured ceiling
                 start_time = time.time()
-                while time.time() - start_time < 90:
+                while time.time() - start_time < wait_sec:
                     poll_resp = client.get(poll_url, headers=headers)
                     if poll_resp.status_code != 200:
                         log.warning("Replicate prediction poll failed: %d", poll_resp.status_code)
@@ -246,7 +263,7 @@ class SFXPicker:
                                 "ffmpeg", "-y",
                                 "-i", str(temp_audio_path),
                                 "-c:a", "libmp3lame",
-                                "-q:a", "2",
+                                "-q:a", str(cfg.get("mp3_quality", 2)),
                                 "-vn",
                                 str(dest_path)
                             ]
@@ -263,9 +280,9 @@ class SFXPicker:
                         log.warning("Replicate prediction failed: %s", status_data.get("error"))
                         return False
                     
-                    time.sleep(2)
-                
-                log.warning("Replicate prediction timed out after 90 seconds")
+                    time.sleep(poll_sec)
+
+                log.warning("Replicate prediction timed out after %d seconds", wait_sec)
                 return False
         except Exception as e:
             log.warning("Failed calling Replicate API for MMAudio: %s", e)

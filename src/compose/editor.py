@@ -97,7 +97,13 @@ class Editor:
                  horizontal: tuple[int, int] = (1920, 1080),
                  transition_type: str = "fade",
                  transition_duration_sec: float = 0.5,
-                 split_threshold_sec: float = 60.0) -> None:
+                 split_threshold_sec: float = 60.0,
+                 settings=None) -> None:
+        from src.config import get_settings as _get_settings
+        cfg = (settings if settings is not None else _get_settings()).get("editor", {}) or {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        self._cfg = cfg
         self.fps = fps
         self.loudness_lufs = loudness_lufs
         self.outro_duration_sec = outro_duration_sec
@@ -106,6 +112,10 @@ class Editor:
         self.transition_type = transition_type
         self.transition_duration_sec = transition_duration_sec
         self.split_threshold_sec = split_threshold_sec
+
+    def _opt(self, key: str, default):
+        val = self._cfg.get(key, default)
+        return val if val is not None else default
 
     # --------------------------------------------------------------- public
     def compose(self, inputs: CompositionInputs, out_dir: Path | str,
@@ -176,7 +186,7 @@ class Editor:
         norm_dir.mkdir(exist_ok=True)
 
         # Force high-quality 720p upscale for normalized clips (monetization resolution strategy)
-        target_w, target_h = 1280, 720
+        target_w, target_h = int(self._opt("norm_width", 1280)), int(self._opt("norm_height", 720))
 
         norm_clips: list[Path] = []
         for i, clip in enumerate(inputs.clips):
@@ -186,7 +196,7 @@ class Editor:
                 "-vf", f"minterpolate=fps={self.fps}:mi_mode=blend,"
                        f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease:flags=lanczos,"
                        f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:black",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "18",
+                "-preset", str(self._opt("preset", "medium")), "-crf", str(self._opt("crf", 18)),
                 "-an",                       # drop source audio; we add our own
                 str(norm),
             ])
@@ -199,7 +209,7 @@ class Editor:
                 "-loop", "1", "-i", str(inputs.outro_image),
                 "-t", str(self.outro_duration_sec),
                 "-r", str(self.fps),
-                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "18",
+                "-preset", str(self._opt("preset", "medium")), "-crf", str(self._opt("crf", 18)),
                 "-vf", f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
                        f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:black",
                 str(outro_clip),
@@ -278,12 +288,15 @@ class Editor:
 
         filter_complex = ";".join(filters)
 
+        # Static context — read encode opts from settings directly.
+        from src.config import get_settings as _get_settings
+        _cfg = _get_settings().get("editor", {}) or {}
         _run_ffmpeg([
             *input_args,
             "-filter_complex", filter_complex,
             "-map", "[vout]",
             "-c:v", "libx264", "-pix_fmt", "yuv420p",
-            "-preset", "medium", "-crf", "18",
+            "-preset", str(_cfg.get("preset", "medium")), "-crf", str(_cfg.get("crf", 18)),
             "-an",
             str(out_path),
         ])
@@ -307,11 +320,11 @@ class Editor:
             delay_ms = int(sfx.start_sec * 1000)
             # Apply delay to all channels, trim to duration, set default volume
             filter_inputs.append(
-                f"[{i}:a]adelay={delay_ms}:all=true,atrim=end={sfx.duration_sec},volume=0.5[sfx_{i}]"
+                f"[{i}:a]adelay={delay_ms}:all=true,atrim=end={sfx.duration_sec},volume={self._opt('sfx_volume', 0.5)}[sfx_{i}]"
             )
 
         if len(valid_sfx) == 1:
-            filter_complex = f"[0:a]adelay={int(valid_sfx[0].start_sec * 1000)}:all=true,atrim=end={valid_sfx[0].duration_sec},volume=0.5,apad=whole_dur={target_duration:.3f}[a]"
+            filter_complex = f"[0:a]adelay={int(valid_sfx[0].start_sec * 1000)}:all=true,atrim=end={valid_sfx[0].duration_sec},volume={self._opt('sfx_volume', 0.5)},apad=whole_dur={target_duration:.3f}[a]"
         else:
             mix_inputs = "".join(f"[sfx_{i}]" for i in range(len(valid_sfx)))
             mix_filter = f"{mix_inputs}amix=inputs={len(valid_sfx)}:duration=longest"
@@ -324,7 +337,7 @@ class Editor:
             "-map", "[a]",
             "-vn",
             "-t", f"{target_duration:.3f}",
-            "-c:a", "aac", "-b:a", "192k",
+            "-c:a", "aac", "-b:a", str(self._opt("audio_bitrate", "192k")),
             str(out_sfx),
         ])
         return out_sfx
@@ -344,38 +357,38 @@ class Editor:
         # 2. Combine BGM (music) and SFX into a background track
         bg_track = None
         if inputs.music_audio and sfx_track:
-            music_vol = 0.55 if inputs.narration_audio else 0.75
+            music_vol = float(self._opt("music_volume", 0.55)) if inputs.narration_audio else float(self._opt("music_sfx_mix", 0.75))
             _run_ffmpeg([
                 "-stream_loop", "-1",
                 "-i", str(inputs.music_audio),
                 "-i", str(sfx_track),
                 "-filter_complex",
-                f"[0:a]volume={music_vol}[m];[1:a]volume=0.6[s];[m][s]amix=inputs=2:duration=longest[bg]",
+                f"[0:a]volume={music_vol}[m];[1:a]volume={self._opt('sfx_solo_volume', 0.6)}[s];[m][s]amix=inputs=2:duration=longest[bg]",
                 "-map", "[bg]",
                 "-vn",
                 "-t", f"{target_duration:.3f}",
-                "-c:a", "aac", "-b:a", "192k", str(out_dir / "_bg_combined.m4a"),
+                "-c:a", "aac", "-b:a", str(self._opt("audio_bitrate", "192k")), str(out_dir / "_bg_combined.m4a"),
             ])
             bg_track = out_dir / "_bg_combined.m4a"
         elif inputs.music_audio:
-            music_vol = 0.55 if inputs.narration_audio else 0.85
+            music_vol = float(self._opt("music_volume", 0.55)) if inputs.narration_audio else float(self._opt("music_solo", 0.85))
             _run_ffmpeg([
                 "-stream_loop", "-1",
                 "-i", str(inputs.music_audio),
                 "-af", f"volume={music_vol}",
                 "-vn",
                 "-t", f"{target_duration:.3f}",
-                "-c:a", "aac", "-b:a", "192k", str(out_dir / "_bg_combined.m4a"),
+                "-c:a", "aac", "-b:a", str(self._opt("audio_bitrate", "192k")), str(out_dir / "_bg_combined.m4a"),
             ])
             bg_track = out_dir / "_bg_combined.m4a"
         elif sfx_track:
-            sfx_vol = 0.6 if inputs.narration_audio else 0.85
+            sfx_vol = float(self._opt("sfx_solo_volume", 0.6)) if inputs.narration_audio else float(self._opt("sfx_solo_no_voice", 0.85))
             _run_ffmpeg([
                 "-i", str(sfx_track),
                 "-af", f"volume={sfx_vol}",
                 "-vn",
                 "-t", f"{target_duration:.3f}",
-                "-c:a", "aac", "-b:a", "192k", str(out_dir / "_bg_combined.m4a"),
+                "-c:a", "aac", "-b:a", str(self._opt("audio_bitrate", "192k")), str(out_dir / "_bg_combined.m4a"),
             ])
             bg_track = out_dir / "_bg_combined.m4a"
 
@@ -385,12 +398,12 @@ class Editor:
                 "-i", str(inputs.narration_audio),
                 "-i", str(bg_track),
                 "-filter_complex",
-                "[1:a][0:a]sidechaincompress=threshold=0.05:ratio=4:attack=5:release=150[ducked];"
-                f"[0:a][ducked]amix=inputs=2:duration=longest:dropout_transition=2,"
+                f"[1:a][0:a]sidechaincompress=threshold={self._opt('duck_threshold', 0.05)}:ratio={self._opt('duck_ratio', 4)}:attack={self._opt('duck_attack', 5)}:release={self._opt('duck_release', 150)}[ducked];"
+                f"[0:a][ducked]amix=inputs=2:duration=longest:dropout_transition={self._opt('duck_dropout', 2)},"
                 f"apad=whole_dur={target_duration:.3f}[a]",
                 "-map", "[a]",
                 "-vn",
-                "-c:a", "aac", "-b:a", "192k",
+                "-c:a", "aac", "-b:a", str(self._opt("audio_bitrate", "192k")),
                 "-t", f"{target_duration:.3f}", str(out),
             ])
         elif inputs.narration_audio:
@@ -398,22 +411,22 @@ class Editor:
                 "-i", str(inputs.narration_audio),
                 "-af", f"apad=whole_dur={target_duration:.3f}",
                 "-vn",
-                "-c:a", "aac", "-b:a", "192k",
+                "-c:a", "aac", "-b:a", str(self._opt("audio_bitrate", "192k")),
                 "-t", f"{target_duration:.3f}", str(out),
             ])
         elif bg_track:
             _run_ffmpeg([
                 "-i", str(bg_track),
-                "-af", f"afade=t=out:st={target_duration - 2:.3f}:d=2",
+                "-af", f"afade=t=out:st={target_duration - float(self._opt('fade_out_sec', 2)):.3f}:d={self._opt('fade_out_sec', 2)}",
                 "-vn",
                 "-t", f"{target_duration:.3f}",
-                "-c:a", "aac", "-b:a", "192k", str(out),
+                "-c:a", "aac", "-b:a", str(self._opt("audio_bitrate", "192k")), str(out),
             ])
         else:
             _run_ffmpeg([
-                "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-f", "lavfi", "-i", f"anullsrc=channel_layout=stereo:sample_rate={self._opt('silent_rate', 44100)}",
                 "-t", f"{target_duration:.3f}",
-                "-c:a", "aac", "-b:a", "128k", str(out),
+                "-c:a", "aac", "-b:a", str(self._opt("silent_bitrate", "128k")), str(out),
             ])
         return out
 
@@ -431,9 +444,9 @@ class Editor:
             vf.append(f"ass='{ass_path}'")
         # Determine bitrate based on resolution to ensure monetization-grade quality
         if max(w, h) >= 1920:
-            bitrate_args = ["-b:v", "8M", "-maxrate", "12M", "-bufsize", "24M"]
+            bitrate_args = ["-b:v", str(self._opt("hq_bitrate", "8M")), "-maxrate", str(self._opt("hq_maxrate", "12M")), "-bufsize", str(self._opt("hq_bufsize", "24M"))]
         else:
-            bitrate_args = ["-b:v", "5M", "-maxrate", "7M", "-bufsize", "14M"]
+            bitrate_args = ["-b:v", str(self._opt("sq_bitrate", "5M")), "-maxrate", str(self._opt("sq_maxrate", "7M")), "-bufsize", str(self._opt("sq_bufsize", "14M"))]
 
         _run_ffmpeg([
             "-i", str(concat_video),
@@ -442,7 +455,7 @@ class Editor:
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "medium",
             "-crf", "18",
             *bitrate_args,
-            "-c:a", "aac", "-b:a", "192k",
+            "-c:a", "aac", "-b:a", str(self._opt("audio_bitrate", "192k")),
             "-movflags", "+faststart",   # web-streaming friendly
             "-shortest", str(out_path),
         ])
@@ -452,7 +465,7 @@ class Editor:
         # Pass 1: measure.
         measure = subprocess.run(
             ["ffmpeg", "-hide_banner", "-i", str(path),
-             "-af", f"loudnorm=I={self.loudness_lufs}:TP=-1.5:LRA=11:print_format=json",
+             "-af", f"loudnorm=I={self.loudness_lufs}:TP={self._opt('loudnorm_tp', -1.5)}:LRA={self._opt('loudnorm_lra', 11)}:print_format=json",
              "-f", "null", "-"],
             capture_output=True, text=True,
         )
@@ -478,31 +491,38 @@ class Editor:
         tmp = path.with_suffix(".norm.mp4")
         _run_ffmpeg([
             "-i", str(path),
-            "-af", (f"loudnorm=I={self.loudness_lufs}:TP=-1.5:LRA=11:"
+            "-af", (f"loudnorm=I={self.loudness_lufs}:TP={self._opt('loudnorm_tp', -1.5)}:LRA={self._opt('loudnorm_lra', 11)}:"
                     f"measured_I={measured_i}:measured_TP={measured_tp}:"
                     f"measured_LRA={measured_lra}:"
                     f"measured_thresh={measured_thresh}:"
                     f"offset={target_offset}:linear=true:print_format=summary"),
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", str(self._opt("audio_bitrate", "192k")),
             str(tmp),
         ])
         tmp.replace(path)
 
 
-def make_outro_image(text: str = "FOLLOW FOR DAILY ACTION", out_path: Path | None = None) -> Path:
+def make_outro_image(text: str | None = None, out_path: Path | None = None,
+                   settings=None) -> Path:
     """
     Generate a simple branded outro PNG using ffmpeg's drawtext filter.
 
     Black background + large bold white text, sized for the vertical video.
+    All visual parameters come from settings.yaml `editor.outro_*`
+    (editable on the dashboard) so no code edit is needed for rebranding.
     """
+    from src.config import get_settings as _get_settings
+    cfg = (settings if settings is not None else _get_settings()).get("editor", {}) or {}
+    text = text or str(cfg.get("outro_text", "FOLLOW FOR DAILY ACTION"))
+    ow, oh = int(cfg.get("outro_width", 1080)), int(cfg.get("outro_height", 1920))
     out_path = out_path or (TEMPLATE_DIR / "outro.png")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _run_ffmpeg([
-        "-f", "lavfi", "-i", "color=c=black:s=1080x1920:d=1",
+        "-f", "lavfi", "-i", f"color=c=black:s={ow}x{oh}:d=1",
         "-vf", (
             f"drawtext=text='{text}':"
-            f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
-            f"fontsize=72:fontcolor=white:"
+            f"fontfile={cfg.get('outro_font', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf')}:"
+            f"fontsize={cfg.get('outro_fontsize', 72)}:fontcolor=white:"
             f"x=(w-text_w)/2:y=(h-text_h)/2"
         ),
         "-vframes", "1", str(out_path),

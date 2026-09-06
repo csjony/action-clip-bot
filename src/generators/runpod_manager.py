@@ -20,6 +20,13 @@ class PodUnavailableError(RuntimeError):
 
 
 
+def _runpod_cfg() -> dict:
+    """Lifecycle tunables from settings.yaml `runpod:` (dashboard-editable)."""
+    from src.config import get_settings
+    cfg = get_settings().get("runpod", {}) or {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
 class RunPodManager:
     def __init__(self, api_key: str, pod_id: str) -> None:
         self.api_key = api_key
@@ -28,7 +35,7 @@ class RunPodManager:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        self.base_url = "https://rest.runpod.io/v1"
+        self.base_url = str(_runpod_cfg().get("base_url", "https://rest.runpod.io/v1"))
 
     # ──────────────────────────────────────────────────────────────────
     # Status helpers
@@ -38,7 +45,7 @@ class RunPodManager:
         """Returns the full raw pod JSON from RunPod API."""
         url = f"{self.base_url}/pods/{self.pod_id}"
         try:
-            with httpx.Client(headers=self.headers, timeout=15.0) as client:
+            with httpx.Client(headers=self.headers, timeout=float(_runpod_cfg().get("api_timeout_sec", 15.0))) as client:
                 resp = client.get(url)
                 if resp.status_code != 200:
                     log.warning("RunPod pod info check failed (status=%d): %s", resp.status_code, resp.text)
@@ -63,23 +70,28 @@ class RunPodManager:
     # Start / Stop
     # ──────────────────────────────────────────────────────────────────
 
-    def _wait_for_running(self, wait_timeout_sec: int) -> str:
+    def _wait_for_running(self, wait_timeout_sec: int | None = None) -> str:
         """Poll until the pod reaches RUNNING state and return its proxy URL."""
+        cfg = _runpod_cfg()
+        wait_timeout_sec = int(wait_timeout_sec if wait_timeout_sec is not None
+                               else cfg.get("running_wait_sec", 300))
+        poll_sec = int(cfg.get("running_poll_sec", 10))
+        proxy_port = int(cfg.get("proxy_port", 8000))
         start_time = time.time()
         log.info("Waiting for pod %s to enter RUNNING state...", self.pod_id)
         while time.time() - start_time < wait_timeout_sec:
             status = self.get_status()
             log.info("RunPod pod status: %s", status)
             if status == "RUNNING":
-                server_url = f"https://{self.pod_id}-8000.proxy.runpod.net"
+                server_url = f"https://{self.pod_id}-{proxy_port}.proxy.runpod.net"
                 log.info("RunPod pod is RUNNING. Target URL: %s", server_url)
                 return server_url
-            time.sleep(10)
+            time.sleep(poll_sec)
         raise RuntimeError(
             f"RunPod pod {self.pod_id!r} failed to reach RUNNING status within {wait_timeout_sec}s"
         )
 
-    def start_pod(self, wait_timeout_sec: int = 300) -> str:
+    def start_pod(self, wait_timeout_sec: int | None = None) -> str:
         """Start the pod, wait for RUNNING, bootstrap the GPU server, and return its proxy URL.
 
         Bootstrap always runs regardless of whether the pod was freshly started or already RUNNING,
@@ -88,7 +100,7 @@ class RunPodManager:
         url = f"{self.base_url}/pods/{self.pod_id}/start"
         log.info("Sending start command to RunPod pod %s...", self.pod_id)
 
-        with httpx.Client(headers=self.headers, timeout=30.0) as client:
+        with httpx.Client(headers=self.headers, timeout=float(_runpod_cfg().get("action_timeout_sec", 30.0))) as client:
             resp = client.post(url)
             if resp.status_code not in (200, 201):
                 body = resp.text.lower()
@@ -106,10 +118,11 @@ class RunPodManager:
     def _bootstrap_gpu_server(self) -> None:
         """Poll the SSH port, connect, and run the GPU server in the background."""
         # Wait up to 60 seconds for publicIp and portMappings to be populated by RunPod
+        cfg = _runpod_cfg()
         start_wait = time.time()
         public_ip = None
         ssh_port = None
-        while time.time() - start_wait < 60:
+        while time.time() - start_wait < int(cfg.get("ip_wait_sec", 60)):
             pod_info = self.get_pod_info()
             public_ip = pod_info.get("publicIp")
             port_mappings = pod_info.get("portMappings") or {}
@@ -117,7 +130,7 @@ class RunPodManager:
             if public_ip and ssh_port:
                 break
             log.info("Waiting for RunPod to assign public IP and port mappings...")
-            time.sleep(3)
+            time.sleep(int(cfg.get("ip_poll_sec", 3)))
 
         if not public_ip or not ssh_port:
             log.warning("No public IP or SSH port mapping found. Skipping SSH bootstrap.")
@@ -130,14 +143,16 @@ class RunPodManager:
         ssh_ready = False
         start_ssh_wait = time.time()
         log.info("Waiting for SSH port %s:%s to open...", public_ip, ssh_port)
-        while time.time() - start_ssh_wait < 60:
+        while time.time() - start_ssh_wait < int(cfg.get("ssh_wait_sec", 60)):
             try:
-                with socket.create_connection((public_ip, int(ssh_port)), timeout=5):
+                with socket.create_connection(
+                        (public_ip, int(ssh_port)),
+                        timeout=int(cfg.get("ssh_connect_timeout_sec", 5))):
                     ssh_ready = True
                     log.info("SSH port is open and accepting connections.")
                     break
             except (socket.timeout, ConnectionRefusedError, OSError):
-                time.sleep(2)
+                time.sleep(int(cfg.get("ssh_retry_sec", 2)))
 
         if not ssh_ready:
             raise RuntimeError(f"SSH port on {public_ip}:{ssh_port} did not open in time.")
@@ -145,19 +160,22 @@ class RunPodManager:
         # 2. Upload the latest local gpu_server.py to the pod before starting it.
         #    This ensures code changes (model patches, memory opts) deploy automatically
         #    without needing manual JupyterLab uploads.
+        remote_path = str(cfg.get("remote_path", "/workspace/gpu_server.py"))
         local_gpu_server = Path(__file__).resolve().parents[2] / "gpu_server.py"
         if local_gpu_server.exists():
-            log.info("Uploading latest gpu_server.py to remote pod at /workspace/gpu_server.py ...")
+            log.info("Uploading latest gpu_server.py to remote pod at %s ...", remote_path)
             try:
                 with open(local_gpu_server, "r", encoding="utf-8") as f:
                     gpu_server_code = f.read()
                 upload_cmd = [
-                    "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+                    "ssh", "-o", "StrictHostKeyChecking=no",
+                    "-o", f"ConnectTimeout={cfg.get('ssh_connect_timeout', 10)}",
                     "-p", str(ssh_port), f"root@{public_ip}",
-                    "cat > /workspace/gpu_server.py",
+                    f"cat > {remote_path}",
                 ]
                 subprocess.run(upload_cmd, input=gpu_server_code, capture_output=True,
-                               text=True, check=True, timeout=30)
+                               text=True, check=True,
+                               timeout=int(cfg.get("upload_timeout_sec", 30)))
                 log.info("gpu_server.py uploaded successfully.")
             except Exception as exc:
                 log.warning("Could not upload gpu_server.py (will use existing version): %s", exc)
@@ -167,8 +185,8 @@ class RunPodManager:
         # 3. Pipe a bootstrap shell script via stdin to `bash -s`.
         #    This is identical to what the user runs manually in the terminal and avoids
         #    all single-line SSH shell-escaping issues that caused exit code 255.
-        hf_token = os.environ.get("HF_TOKEN", "")
-        wan_model_id = os.environ.get("WAN_MODEL_ID", "Wan-AI/Wan2.2-T2V-A14B-Diffusers")
+        hf_token = os.environ.get("HF_TOKEN", "") or os.environ.get("HUGGING_FACE_HUB_TOKEN", "")
+        wan_model_id = os.environ.get("WAN_MODEL_ID", str(cfg.get("default_model", "Wan-AI/Wan2.2-T2V-A14B-Diffusers")))
 
         # Build the bootstrap script as a multiline string
         bootstrap_script = "#!/bin/bash\n"
@@ -200,25 +218,28 @@ class RunPodManager:
             "  done\n"
             "fi\n"
         )
+        proxy_port = int(cfg.get("proxy_port", 8000))
+        restart_age = int(cfg.get("restart_age_sec", 60))
+        restart_settle = int(cfg.get("restart_settle_sec", 2))
         bootstrap_script += (
             "# Skip restart if server is already healthy, unless gpu_server.py was just updated\n"
             "FORCE_RESTART=0\n"
-            "if [ -f \"/workspace/gpu_server.py\" ]; then\n"
-            "  MOD_TIME=$(stat -c %Y /workspace/gpu_server.py)\n"
+            f"if [ -f \"{remote_path}\" ]; then\n"
+            f"  MOD_TIME=$(stat -c %Y {remote_path})\n"
             "  NOW=$(date +%s)\n"
             "  AGE=$((NOW - MOD_TIME))\n"
-            "  if [ $AGE -lt 60 ]; then\n"
+            f"  if [ $AGE -lt {restart_age} ]; then\n"
             "    echo \"gpu_server.py was updated recently ($AGEs ago). Forcing restart.\"\n"
             "    FORCE_RESTART=1\n"
             "  fi\n"
             "fi\n"
-            "if [ $FORCE_RESTART -eq 0 ] && curl -sf http://localhost:8000/ready > /dev/null 2>&1; then\n"
+            f"if [ $FORCE_RESTART -eq 0 ] && curl -sf http://localhost:{proxy_port}/ready > /dev/null 2>&1; then\n"
             "  echo 'GPU server already ready — skipping restart'\n"
             "  exit 0\n"
             "fi\n"
             "pkill -f 'gpu_server.py' || true\n"
-            "sleep 2\n"
-            "nohup python3 -u /workspace/gpu_server.py > /workspace/gpu_server.log 2>&1 &\n"
+            f"sleep {restart_settle}\n"
+            f"nohup python3 -u {remote_path} > /workspace/gpu_server.log 2>&1 &\n"
             "echo \"Started gpu_server.py PID: $!\"\n"
         )
 
@@ -226,7 +247,7 @@ class RunPodManager:
             "ssh",
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "ConnectTimeout=10",
+            "-o", f"ConnectTimeout={cfg.get('ssh_connect_timeout', 10)}",
             "-p", str(ssh_port),
             f"root@{public_ip}",
             "bash -s",
@@ -236,7 +257,8 @@ class RunPodManager:
             res = subprocess.run(
                 ssh_cmd,
                 input=bootstrap_script,
-                capture_output=True, text=True, check=True, timeout=30,
+                capture_output=True, text=True, check=True,
+                timeout=int(cfg.get("bootstrap_timeout_sec", 30)),
             )
             log.info("SSH bootstrap succeeded: %s", res.stdout.strip())
         except subprocess.CalledProcessError as exc:
@@ -251,7 +273,7 @@ class RunPodManager:
         """Halt the pod to stop billing."""
         url = f"{self.base_url}/pods/{self.pod_id}/stop"
         log.info("Sending stop command to RunPod pod %s...", self.pod_id)
-        with httpx.Client(headers=self.headers, timeout=30.0) as client:
+        with httpx.Client(headers=self.headers, timeout=float(_runpod_cfg().get("action_timeout_sec", 30.0))) as client:
             resp = client.post(url)
             if resp.status_code not in (200, 201):
                 log.warning("Failed to stop RunPod pod (status=%d): %s", resp.status_code, resp.text)
