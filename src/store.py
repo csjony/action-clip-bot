@@ -477,14 +477,16 @@ class Store:
             return [dict(r) for r in rows]
 
     def current_run_id(self) -> str | None:
-        """The run_id of the most recent run that hasn't emitted run_finished."""
+        """The run_id of the most recent run that hasn't reached a terminal
+        state (finished / failed / cancelled)."""
         with self._lock:
             row = self._conn.execute(
                 """SELECT e1.run_id FROM events e1
-                   WHERE e1.kind != 'run_finished'
                    GROUP BY e1.run_id
-                   HAVING MAX(e1.id) = (SELECT MAX(e2.id) FROM events e2
-                                         WHERE e2.run_id = e1.run_id)
+                   HAVING (SELECT e2.kind FROM events e2
+                             WHERE e2.run_id = e1.run_id
+                             ORDER BY e2.id DESC LIMIT 1)
+                          NOT IN ('run_finished', 'run_failed', 'run_cancelled')
                    ORDER BY MAX(e1.id) DESC LIMIT 1""",
             ).fetchone()
             return row["run_id"] if row else None
