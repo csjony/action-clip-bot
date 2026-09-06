@@ -3,29 +3,87 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Action Clip Bot — generate cinematic AI action videos and publish everywhere.">
+<meta name="theme-color" content="#07080e">
 <title>{% block title %}Action Clip Bot{% endblock %}</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<nav>
-  <a href="/" class="brand">🎬 Action Clip Bot</a>
-  <div class="nav-links">
-    <a href="/">Dashboard</a>
-    <a href="/accounts">Accounts</a>
-    <a href="/runs">Runs</a>
-    <a href="/posts">Posts</a>
-    <a href="/generate">Generate</a>
-    <a href="/usage">Usage</a>
-    <a href="/logs">Logs</a>
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="shell">
+  <aside class="sidebar" id="sidebar" aria-label="Primary">
+    <a href="/" class="brand" aria-label="Action Clip Bot home">
+      <span class="brand-mark" aria-hidden="true">🎬</span>
+      <span class="brand-text">Action Clip Bot</span>
+    </a>
+    <nav class="side-nav">
+      <p class="side-heading">Create</p>
+      <a href="/" class="side-link {% if active_page == 'dashboard' %}active{% endif %}" {% if active_page == 'dashboard' %}aria-current="page"{% endif %}>
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3h6v6H3zM11 3h6v4h-6zM11 9h6v8h-6zM3 11h6v6H3z" fill="currentColor"/></svg>
+        <span>Dashboard</span>
+      </a>
+      <a href="/generate" class="side-link side-link-cta {% if active_page == 'generate' %}active{% endif %}" {% if active_page == 'generate' %}aria-current="page"{% endif %}>
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2l2.4 4.9 5.6.8-4 4 .9 5.6-4.9-2.6-4.9 2.6.9-5.6-4-4 5.6-.8z" fill="currentColor"/></svg>
+        <span>Generate</span>
+      </a>
+      <p class="side-heading">Manage</p>
+      <a href="/runs" class="side-link {% if active_page == 'runs' %}active{% endif %}" {% if active_page == 'runs' %}aria-current="page"{% endif %}>
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5h12v2H4zm0 4h12v2H4zm0 4h7v2H4z" fill="currentColor"/></svg>
+        <span>Runs</span>
+      </a>
+      <a href="/posts" class="side-link {% if active_page == 'posts' %}active{% endif %}" {% if active_page == 'posts' %}aria-current="page"{% endif %}>
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h14v10H8l-4 3v-3H3zm2 2v6h10V6z" fill="currentColor"/></svg>
+        <span>Posts</span>
+      </a>
+      <p class="side-heading">Configure</p>
+      <a href="/accounts" class="side-link {% if active_page == 'accounts' %}active{% endif %}" {% if active_page == 'accounts' %}aria-current="page"{% endif %}>
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 8a2.5 2.5 0 100-5 2.5 2.5 0 000 5zm-6 9c0-3 3-5 6-5s6 2 6 5v1H4z" fill="currentColor"/></svg>
+        <span>Accounts</span>
+      </a>
+      <a href="/usage" class="side-link {% if active_page == 'usage' %}active{% endif %}" {% if active_page == 'usage' %}aria-current="page"{% endif %}>
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 16l4-6 3 3 4-7 3 4v6z" fill="currentColor"/></svg>
+        <span>Usage</span>
+      </a>
+      <a href="/logs" class="side-link {% if active_page == 'logs' %}active{% endif %}" {% if active_page == 'logs' %}aria-current="page"{% endif %}>
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3h12v14H4zm2 2v2h8V5zm0 4v2h8V9zm0 4v2h5v-2z" fill="currentColor"/></svg>
+        <span>Logs</span>
+      </a>
+    </nav>
+    <div class="side-foot">
+      <a href="/healthz" class="health-line" title="Liveness probe">
+        <span class="health-dot" id="health-dot" aria-hidden="true"></span>
+        <span>v{{ app_version | default('1.0.0') }}</span>
+      </a>
+    </div>
+  </aside>
+  <div class="scrim" id="scrim" hidden></div>
+  <div class="body-col">
+    <header class="topbar">
+      <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="sidebar" aria-label="Open navigation">☰</button>
+      <nav class="crumbs" aria-label="Breadcrumb">
+        <span class="crumb-section">{% if active_page in ['dashboard', 'generate'] %}Create{% elif active_page in ['runs', 'posts'] %}Manage{% elif active_page in ['accounts', 'usage', 'logs'] %}Configure{% else %}Action Clip Bot{% endif %}</span>
+        <span class="crumb-sep" aria-hidden="true">/</span>
+        <span class="crumb-page">{% block crumb %}Dashboard{% endblock %}</span>
+      </nav>
+      <div class="topbar-right">
+        <a class="status-pill" id="status-pill" href="/" title="Pipeline status">
+          <span class="status-dot" id="status-dot" aria-hidden="true"></span>
+          <span id="status-text">Idle</span>
+        </a>
+        <a href="/generate" class="btn btn-sm topbar-cta">+ New video</a>
+      </div>
+    </header>
+    <main id="main">
+      {% block content %}{% endblock %}
+    </main>
+    <footer>
+      <span>Action Clip Bot v{{ app_version | default('1.0.0') }}</span>
+      <span class="muted"> · <a href="/healthz" style="color:inherit;">health</a></span>
+    </footer>
   </div>
-</nav>
-<main>
-{% block content %}{% endblock %}
-</main>
-<footer>
-  <span>Action Clip Bot v0.1.0</span>
-</footer>
-<script src="/static/dash.js"></script>
+</div>
+<div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="false"></div>
+<script src="/static/dash.js" defer></script>
 {% block scripts %}{% endblock %}
 </body>
 </html>

@@ -1,12 +1,23 @@
 {% extends "base.html" %}
 {% block title %}Generated Videos — Action Clip Bot{% endblock %}
+{% block crumb %}Posts{% endblock %}
 {% block content %}
-<h1>Assembled Video Database</h1>
-<p class="muted" style="margin-bottom: 2rem;">Overview of all generated video scripts, metadata, rendering status, and external publishing links.</p>
+<div class="page-head">
+  <div>
+    <h1>Assembled Video Database</h1>
+    <p class="muted page-sub">Every generated video, its status and publishing links.</p>
+  </div>
+  <div class="page-actions">
+    {% if posts %}
+    <input type="search" class="table-filter" data-table-filter="posts-table" placeholder="Filter videos…" aria-label="Filter videos">
+    {% endif %}
+    <a href="/generate" class="btn btn-sm">+ New video</a>
+  </div>
+</div>
 
 {% if posts %}
 <div class="table-container">
-  <table>
+  <table id="posts-table">
     <thead>
       <tr><th>ID</th><th>Created At</th><th>Title / Theme</th><th>Status</th><th>Published Links</th></tr>
     </thead>
@@ -16,7 +27,7 @@
         <td><strong>#{{ p.id }}</strong></td>
         <td style="font-family: monospace; color: var(--text-muted);">{{ fmt_ts(p.created_at) }}</td>
         <td>
-          <div style="font-weight: 600; font-size: 0.95rem; color: #fff; margin-bottom: 0.25rem;">
+          <div style="font-weight: 500; font-size: 0.95rem; color: var(--text); margin-bottom: 0.25rem;">
             {{ p.title[:60] }}{% if p.title|length > 60 %}…{% endif %}
           </div>
           <span class="badge" style="background: rgba(99, 102, 241, 0.1); color: var(--primary); font-size: 0.72rem; padding: 1px 6px;">
@@ -50,6 +61,10 @@
   </table>
 </div>
 {% else %}
-<p class="muted">No video database entries yet. Launch a new run to create one!</p>
+<div class="empty-state">
+  <div class="empty-icon">📭</div>
+  <p class="muted">No video database entries yet. Launch a new run to create one!</p>
+  <a href="/generate" class="btn" style="margin-top:1rem;">Generate video →</a>
+</div>
 {% endif %}
 {% endblock %}

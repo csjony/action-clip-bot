@@ -17,13 +17,42 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from src.config import db_path, get_settings, get_providers_config
+from src.config import PROJECT_ROOT, db_path, get_settings, get_providers_config
 from src.dashboard.accounts import AccountStore
 from src.dashboard.events import EventBus
 from src.dashboard.runner import PipelineRunner
 from src.store import Store
 
 log = logging.getLogger("action-clip-bot.dashboard")
+
+
+def _app_version() -> str:
+    """Single source of truth for the footer / health endpoint."""
+    # Prefer the repo's pyproject (editable source of truth) over stale
+    # installed dist metadata.
+    try:
+        import tomllib
+
+        with open(PROJECT_ROOT / "pyproject.toml", "rb") as fh:
+            v = str(tomllib.load(fh).get("project", {}).get("version", ""))
+            if v:
+                return v
+    except Exception:
+        pass
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        return _pkg_version("action-clip-bot")
+    except Exception:
+        return "1.0.0"
+
+
+APP_VERSION = _app_version()
+
+
+def _base_context(request: Request, active_page: str) -> dict:
+    """Shared template vars so every page gets nav state + version for free."""
+    return {"request": request, "active_page": active_page, "app_version": APP_VERSION}
 
 
 # ---------------------------------------------------------------------------
@@ -33,7 +62,7 @@ def _setup_file_logging() -> None:
     """Attach a FileHandler to the root logger so every log.info/warning/error
     from the pipeline worker thread also lands in data/dashboard.log.
     Called once at module import time so it is in place before any run starts."""
-    log_path = Path("data") / "dashboard.log"
+    log_path = PROJECT_ROOT / "data" / "dashboard.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter(
         "%(asctime)s %(levelname)-7s %(name)s: %(message)s",
@@ -167,8 +196,61 @@ async def auth_middleware(request: Request, call_next):
     if request.url.path.startswith("/static") or request.url.path == "/favicon.ico":
         return await call_next(request)
     if not _check_auth(request):
-        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
-    return await call_next(request)
+        # Browsers hitting a page get a native login prompt; API/JS callers
+        # get JSON so fetch() handlers can show a toast instead of HTML.
+        accept = request.headers.get("accept", "")
+        if "text/html" in accept:
+            return HTMLResponse(
+                content="<h1>401 Unauthorized</h1><p>Dashboard login required.</p>",
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="Action Clip Bot"'},
+            )
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Unauthorized"},
+            headers={"WWW-Authenticate": 'Basic realm="Action Clip Bot"'},
+        )
+    response = await call_next(request)
+    # Minimal hardening headers (no external deps).
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    return response
+
+
+@app.get("/healthz", include_in_schema=False)
+async def healthz():
+    """Cheap liveness probe for docker / uptime monitors (no auth needed)."""
+    return {"status": "ok", "version": APP_VERSION, "busy": runner.is_busy if "runner" in globals() else False}
+
+
+@app.exception_handler(404)
+async def not_found_handler(request: Request, exc):
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept:
+        return templates.TemplateResponse(
+            request, "error.html",
+            {**_base_context(request, ""), "code": 404,
+             "title": "Page not found",
+             "message": f"No route matches {request.url.path}."},
+            status_code=404,
+        )
+    return JSONResponse(status_code=404, content={"detail": "Not found"})
+
+
+@app.exception_handler(500)
+async def server_error_handler(request: Request, exc):
+    log.exception("unhandled dashboard error for %s", request.url.path)
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept:
+        return templates.TemplateResponse(
+            request, "error.html",
+            {**_base_context(request, ""), "code": 500,
+             "title": "Something went wrong",
+             "message": "The dashboard hit an unexpected error. Check Logs for details."},
+            status_code=500,
+        )
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
 # ---------------------------------------------------------------------------
@@ -213,22 +295,57 @@ def _fmt_duration_ms(ms: int | None) -> str:
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     settings = get_settings()
-    spend = store.monthly_spend_usd()
+    try:
+        spend = store.monthly_spend_usd()
+    except Exception:
+        spend = 0.0
     cap = settings.budget_cap_usd
-    current_run = store.current_run_id()
-    runs = store.list_runs(limit=5)
+    try:
+        current_run = store.current_run_id()
+    except Exception:
+        current_run = None
+    try:
+        runs = store.list_runs(limit=5)
+    except Exception:
+        log.exception("failed to list runs")
+        runs = []
 
-    # Count posts this week
-    with store._lock:
-        week_ago = (datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00"))
-        week_count = store._conn.execute(
-            "SELECT COUNT(*) AS c FROM posts WHERE created_at >= ?", (week_ago,)
-        ).fetchone()["c"]
-        total_posts = store._conn.execute(
-            "SELECT COUNT(*) AS c FROM posts"
-        ).fetchone()["c"]
+    # Count posts this week — degrade gracefully if the DB is locked/busy.
+    try:
+        with store._lock:
+            week_ago = (datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00"))
+            week_count = store._conn.execute(
+                "SELECT COUNT(*) AS c FROM posts WHERE created_at >= ?", (week_ago,)
+            ).fetchone()["c"]
+            total_posts = store._conn.execute(
+                "SELECT COUNT(*) AS c FROM posts"
+            ).fetchone()["c"]
+    except Exception:
+        log.exception("failed to count posts")
+        week_count, total_posts = 0, 0
+
+    # GSC-style activity overview: runs per day for the last 14 days.
+    try:
+        from datetime import timedelta
+
+        today = datetime.now(timezone.utc).date()
+        days = [today - timedelta(days=i) for i in range(13, -1, -1)]
+        counts = {d.isoformat(): 0 for d in days}
+        for r in store.list_runs(limit=500):
+            started = (r.get("started_at") or "")[:10]
+            if started in counts:
+                counts[started] += 1
+        activity = [
+            {"label": d.strftime("%d %b"), "count": counts[d.isoformat()]}
+            for d in days
+        ]
+        activity_max = max([a["count"] for a in activity] + [1])
+    except Exception:
+        log.exception("failed to build activity overview")
+        activity, activity_max = [], 1
 
     return templates.TemplateResponse(request, "index.html", {
+        **_base_context(request, "dashboard"),
         "spend": spend,
         "cap": cap,
         "spend_pct": min(100, (spend / cap * 100) if cap > 0 else 0),
@@ -236,6 +353,8 @@ async def index(request: Request):
         "runs": runs,
         "week_count": week_count,
         "total_posts": total_posts,
+        "activity": activity,
+        "activity_max": activity_max,
     })
 
 
@@ -268,6 +387,7 @@ async def accounts_page(request: Request):
         accounts_by_provider[a["provider"]].append(a)
     
     return templates.TemplateResponse(request, "accounts.html", {
+        **_base_context(request, "accounts"),
         "accounts": all_accounts,
         "accounts_by_provider": dict(accounts_by_provider),
         "provider_groups": provider_groups,
@@ -285,6 +405,16 @@ async def account_add(
     priority: int = Form(default=100),
     enabled: bool = Form(default=True),
 ):
+    provider = (provider or "").strip().lower()[:64]
+    label = (label or "").strip()[:64]
+    email = (email or "").strip()[:254]
+    api_key = (api_key or "").strip()
+    if not provider or not label or not api_key:
+        raise HTTPException(400, "Provider, label and API key are all required.")
+    if len(api_key) > 4000:
+        raise HTTPException(400, "API key is too long (max 4000 chars).")
+    if priority < 0 or priority > 9999:
+        raise HTTPException(400, "Priority must be 0–9999.")
     acct_store.add(provider, label, api_key, email=email or None, extra=None,
                    enabled=enabled, priority=priority)
     # Clear providers config cache so the pool picks up new accounts
@@ -316,6 +446,7 @@ async def account_delete(account_id: int):
 async def runs_page(request: Request, limit: int = Query(default=50, le=200)):
     runs = store.list_runs(limit=limit)
     return templates.TemplateResponse(request, "runs.html", {
+        **_base_context(request, "runs"),
         "runs": runs,
         "is_busy": runner.is_busy,
         "current_run_id": runner.current_run_id,
@@ -333,10 +464,12 @@ async def runs_stop():
 
 @app.get("/runs/{run_id}", response_class=HTMLResponse)
 async def run_detail(request: Request, run_id: str):
+    run_id = (run_id or "").strip()[:64]
     all_events = store.list_events(run_id)
     # Also check runner state
     run_state = runner.get_run(run_id)
     return templates.TemplateResponse(request, "run_detail.html", {
+        **_base_context(request, "runs"),
         "run_id": run_id,
         "events": all_events,
         "run_state": run_state,
@@ -348,38 +481,59 @@ async def run_detail(request: Request, run_id: str):
 # --- Posts ---
 @app.get("/posts", response_class=HTMLResponse)
 async def posts_page(request: Request, limit: int = Query(default=50, le=200)):
-    with store._lock:
-        rows = store._conn.execute(
-            "SELECT * FROM posts ORDER BY created_at DESC LIMIT ?", (limit,)
-        ).fetchall()
-        posts = [dict(r) for r in rows]
+    try:
+        with store._lock:
+            rows = store._conn.execute(
+                "SELECT * FROM posts ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+            posts = [dict(r) for r in rows]
+    except Exception:
+        log.exception("failed to list posts")
+        posts = []
     return templates.TemplateResponse(request, "posts.html", {
+        **_base_context(request, "posts"),
         "posts": posts,
         "fmt_ts": _fmt_ts,
+    })
+
+
+def _theme_prompts() -> tuple[list, dict]:
+    """Render copy-paste LLM prompts for every theme (shared by GET + errors)."""
+    settings = get_settings()
+    themes = settings.llm.get("themes", [])
+    from src.content.scriptwriter import Scriptwriter
+    sw = Scriptwriter(settings)
+    video_cfg = settings.video
+    target_duration = video_cfg.get("target_duration_sec", 70)
+    scene_count = video_cfg.get("max_clips", 12)
+    prompts: dict[str, str] = {}
+    for t in themes:
+        try:
+            prompts[t] = sw._render_prompt(t, scene_count, target_duration)
+        except Exception as exc:
+            prompts[t] = f"Error rendering prompt for theme {t}: {exc}"
+    return themes, prompts
+
+
+def _generate_error(request: Request, error: str, script_json: str):
+    themes, prompts = _theme_prompts()
+    return templates.TemplateResponse(request, "generate.html", {
+        **_base_context(request, "generate"),
+        "themes": themes,
+        "prompts": prompts,
+        "is_busy": runner.is_busy,
+        "current_run_id": runner.current_run_id,
+        "error": error,
+        "script_json": script_json,
     })
 
 
 # --- Generate ---
 @app.get("/generate", response_class=HTMLResponse)
 async def generate_page(request: Request):
-    settings = get_settings()
-    themes = settings.llm.get("themes", [])
-    
-    # Pre-render prompts for all themes
-    from src.content.scriptwriter import Scriptwriter
-    sw = Scriptwriter(settings)
-    video_cfg = settings.video
-    target_duration = video_cfg.get("target_duration_sec", 70)
-    scene_count = video_cfg.get("max_clips", 12)
-    
-    prompts = {}
-    for t in themes:
-        try:
-            prompts[t] = sw._render_prompt(t, scene_count, target_duration)
-        except Exception as exc:
-            prompts[t] = f"Error rendering prompt for theme {t}: {exc}"
-            
+    themes, prompts = _theme_prompts()
     return templates.TemplateResponse(request, "generate.html", {
+        **_base_context(request, "generate"),
         "themes": themes,
         "prompts": prompts,
         "is_busy": runner.is_busy,
@@ -405,30 +559,10 @@ async def generate_submit(
     
     script_json_clean = script_json.strip() or None
     if not script_json_clean:
-        settings = get_settings()
-        themes = settings.llm.get("themes", [])
-        
-        from src.content.scriptwriter import Scriptwriter
-        sw = Scriptwriter(settings)
-        video_cfg = settings.video
-        target_duration = video_cfg.get("target_duration_sec", 70)
-        scene_count = video_cfg.get("max_clips", 12)
-        
-        prompts = {}
-        for t in themes:
-            try:
-                prompts[t] = sw._render_prompt(t, scene_count, target_duration)
-            except Exception:
-                prompts[t] = f"Error rendering prompt for theme {t}"
-                
-        return templates.TemplateResponse(request, "generate.html", {
-            "themes": themes,
-            "prompts": prompts,
-            "is_busy": runner.is_busy,
-            "current_run_id": runner.current_run_id,
-            "error": "Manual Script JSON is required to start a run.",
-            "script_json": "",
-        })
+        return _generate_error(request, "Manual Script JSON is required to start a run.", "")
+
+    if len(script_json_clean) > 200_000:
+        return _generate_error(request, "Script JSON is too large (max 200 KB).", script_json)
 
     # Quick validation
     try:
@@ -439,33 +573,12 @@ async def generate_submit(
             if text.endswith("```"):
                 text = text[:-3]
             text = text.strip()
-        json.loads(text)
+        parsed = json.loads(text)
+        if not isinstance(parsed, dict) or "scenes" not in parsed:
+            return _generate_error(request, "Script JSON must be an object with a 'scenes' list.", script_json)
         script_json_clean = text # save normalized json
     except Exception as exc:
-        settings = get_settings()
-        themes = settings.llm.get("themes", [])
-        
-        from src.content.scriptwriter import Scriptwriter
-        sw = Scriptwriter(settings)
-        video_cfg = settings.video
-        target_duration = video_cfg.get("target_duration_sec", 70)
-        scene_count = video_cfg.get("max_clips", 12)
-        
-        prompts = {}
-        for t in themes:
-            try:
-                prompts[t] = sw._render_prompt(t, scene_count, target_duration)
-            except Exception:
-                prompts[t] = f"Error rendering prompt for theme {t}"
-                
-        return templates.TemplateResponse(request, "generate.html", {
-            "themes": themes,
-            "prompts": prompts,
-            "is_busy": runner.is_busy,
-            "current_run_id": runner.current_run_id,
-            "error": f"Invalid JSON: {exc}",
-            "script_json": script_json,
-        })
+        return _generate_error(request, f"Invalid JSON: {exc}", script_json)
 
     state = runner.submit(
         dry_run=dry_run,
@@ -505,6 +618,7 @@ async def usage_page(request: Request):
     spend = store.monthly_spend_usd()
     cap = get_settings().budget_cap_usd
     return templates.TemplateResponse(request, "usage.html", {
+        **_base_context(request, "usage"),
         "credit_data": credit_data,
         "monthly_spend": spend,
         "budget_cap": cap,
@@ -514,15 +628,18 @@ async def usage_page(request: Request):
 # --- Logs ---
 @app.get("/logs", response_class=HTMLResponse)
 async def logs_page(request: Request, source: str = "dashboard"):
+    source = source if source in ("dashboard", "gpu") else "dashboard"
     return templates.TemplateResponse(request, "logs.html", {
+        **_base_context(request, "logs"),
         "source": source,
     })
 
 
 @app.get("/api/logs")
 async def api_logs(source: str = "dashboard", limit: int = 500):
+    limit = max(50, min(limit, 2000))
     if source == "dashboard":
-        log_file = Path("data/dashboard.log")
+        log_file = PROJECT_ROOT / "data" / "dashboard.log"
         if not log_file.exists():
             return {"content": "No dashboard log file found yet."}
         try:

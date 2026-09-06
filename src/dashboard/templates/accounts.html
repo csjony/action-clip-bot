@@ -1,18 +1,21 @@
 {% extends "base.html" %}
 {% block title %}API Accounts & Fallback Chains — Action Clip Bot{% endblock %}
+{% block crumb %}Accounts{% endblock %}
 {% block content %}
-<h1>API Accounts & Fallback Chains</h1>
-<p class="muted" style="margin-bottom: 2rem;">
-  Configure multiple API keys and endpoints. The bot queries them in priority order (lower value first) and gracefully falls through to the next key on rate limit, quota exhaustion, or error.
-</p>
+<div class="page-head">
+  <div>
+    <h1>API Accounts & Fallback Chains</h1>
+    <p class="muted page-sub">Keys are tried in priority order — lower first, then automatic fallback.</p>
+  </div>
+</div>
 
 <!-- Add account form -->
-<div class="card" style="margin-bottom: 2.5rem;">
-  <h3>✨ Register New API Credential</h3>
+<div class="card" style="margin-bottom: 1.25rem;">
+  <h3>Register new API credential</h3>
   <form method="post" action="/accounts/add" id="add-account-form" style="margin-top: 1.25rem;">
 
     <div class="form-row">
-      <label style="width:100%; font-weight:600; margin-bottom:0.5rem; color:#fff;">Select API Provider</label>
+      <label style="width:100%; font-weight:500; margin-bottom:0.5rem; color:var(--text);">Select API Provider</label>
     </div>
     <input type="hidden" name="provider" id="selected-provider" required>
 
@@ -20,21 +23,20 @@
     <p class="muted" style="margin: 1rem 0 0.5rem; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700; color: var(--primary);">
       {{ group_label }}
     </p>
-    <div class="provider-grid">
+    <div class="provider-grid" role="group" aria-label="{{ group_label }} providers">
       {% for p in providers %}
       {% set info = provider_info.get(p, {}) %}
-      <div class="provider-card" id="pcard-{{ p }}" data-provider="{{ p }}" onclick="selectProvider('{{ p }}', this)">
-        <div class="provider-card-top" style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
-          <span class="provider-name" style="font-weight: 700; font-size: 1rem; color: #fff;">{{ p }}</span>
-          {% if info.url %}
-          <a class="provider-link" href="{{ info.url }}" target="_blank" rel="noopener"
-             onclick="event.stopPropagation()" title="Get API key for {{ p }}" style="color: var(--primary); text-decoration: none; font-size: 0.95rem;">
-            Get Key ↗
-          </a>
+      <div class="provider-card-wrap">
+        <button type="button" class="provider-card" id="pcard-{{ p }}" data-provider="{{ p }}" onclick="selectProvider('{{ p }}', this)" aria-pressed="false">
+          <span class="provider-name" style="font-weight: 500; font-size: 0.95rem; color: var(--text);">{{ p }}</span>
+          {% if info.desc %}
+          <span class="provider-desc" style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem;">{{ info.desc }}</span>
           {% endif %}
-        </div>
-        {% if info.desc %}
-        <span class="provider-desc" style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem;">{{ info.desc }}</span>
+        </button>
+        {% if info.url %}
+        <a class="provider-link" href="{{ info.url }}" target="_blank" rel="noopener" title="Get API key for {{ p }}" style="color: var(--primary); text-decoration: none; font-size: 0.8rem;">
+          Get Key ↗
+        </a>
         {% endif %}
       </div>
       {% endfor %}
@@ -42,15 +44,16 @@
     {% endfor %}
 
     <!-- Standard fields -->
-    <div class="form-row" style="margin-top: 2rem;">
-      <label>Label / Name
-        <input type="text" name="label" placeholder="e.g. main-key, backup-key" required>
+    <div class="form-row" style="margin-top: 1rem;">
+      <label for="acct-label"><span class="label-title">Label / Name <span class="required-mark" aria-hidden="true">*</span></span>
+        <input id="acct-label" type="text" name="label" placeholder="e.g. main-key, backup-key" required maxlength="64">
       </label>
-      <label>Email (Optional)
-        <input type="email" name="email" placeholder="registered-email@domain.com">
+      <label for="acct-email">Email (Optional)
+        <input id="acct-email" type="email" name="email" placeholder="registered-email@domain.com" maxlength="254">
       </label>
-      <label>API Key or URL
-        <input type="text" name="api_key" placeholder="Paste credential secret or local endpoint url" required style="font-family: monospace;">
+      <label for="acct-key"><span class="label-title">API Key or URL <span class="required-mark" aria-hidden="true">*</span></span>
+        <input id="acct-key" type="text" name="api_key" placeholder="Paste credential secret or local endpoint url" required maxlength="4000" style="font-family: monospace;" autocomplete="off">
+        <span class="field-hint">Stored locally in SQLite. Never commit it to git.</span>
       </label>
     </div>
 
@@ -79,10 +82,10 @@
 </p>
 
 {% for provider, accts in accounts_by_provider.items() %}
-<div class="card" style="margin-bottom: 2rem; border-color: rgba(99, 102, 241, 0.15);">
+<div class="card" style="margin-bottom: 1rem; border-color: rgba(99, 102, 241, 0.15);">
   <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border);">
     <h3 style="margin: 0; text-transform: uppercase; letter-spacing: 0.05em; font-size: 1.1rem; display: flex; align-items: center; gap: 0.5rem;">
-      📂 {{ provider }}
+      {{ provider }}
     </h3>
     <span class="badge badge-dry">
       {{ accts|length }} key{{ 's' if accts|length > 1 else '' }} registered
@@ -110,15 +113,15 @@
               <span class="muted">—</span>
             {% else %}
               {% if loop.first %}
-                <span class="text-success">⚡ Primary</span>
+                <span class="text-success">Primary</span>
               {% else %}
-                <span class="text-warn">↩️ Fallback {{ loop.index0 }}</span>
+                <span class="text-warn">Fallback {{ loop.index0 }}</span>
               {% endif %}
             {% endif %}
           </td>
           <td><strong>{{ a.label }}</strong></td>
           <td style="color: var(--text-muted);">{{ a.email or "—" }}</td>
-          <td><code>{{ a.api_key[:8] }}…{{ a.api_key[-4:] }}</code></td>
+          <td><code>{% if a.api_key and a.api_key|length > 12 %}{{ a.api_key[:8] }}…{{ a.api_key[-4:] }}{% else %}••••••••{% endif %}</code></td>
           <td style="text-align: center; font-family: monospace;">{{ a.priority }}</td>
           <td style="text-align: center;">
             <span class="status-badge {% if a.enabled %}enabled{% else %}disabled{% endif %}">
@@ -147,12 +150,22 @@
 
 <script>
 function selectProvider(name, el) {
-  document.querySelectorAll('.provider-card').forEach(c => c.classList.remove('selected'));
+  document.querySelectorAll('.provider-card').forEach(c => {
+    c.classList.remove('selected');
+    c.setAttribute('aria-pressed', 'false');
+  });
   el.classList.add('selected');
+  el.setAttribute('aria-pressed', 'true');
   document.getElementById('selected-provider').value = name;
 
   document.getElementById('add-btn').disabled = false;
   document.getElementById('provider-required-hint').style.display = 'none';
 }
+
+document.getElementById('add-account-form').addEventListener('submit', (e) => {
+  const btn = document.getElementById('add-btn');
+  btn.disabled = true;
+  btn.textContent = 'Adding…';
+});
 </script>
 {% endblock %}

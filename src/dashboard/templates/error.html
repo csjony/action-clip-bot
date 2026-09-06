@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}{{ code }} — {{ title }}{% endblock %}
+{% block crumb %}Error{% endblock %}
+{% block content %}
+<div class="empty-state">
+  <div class="empty-icon">{{ "🔍" if code == 404 else "⚠️" }}</div>
+  <h1>{{ code }} · {{ title }}</h1>
+  <p class="muted">{{ message }}</p>
+  <div style="display:flex; gap:0.75rem; justify-content:center; flex-wrap:wrap; margin-top:1.5rem;">
+    <a href="/" class="btn btn-secondary">← Dashboard</a>
+    <a href="/generate" class="btn">Generate video →</a>
+  </div>
+</div>
+{% endblock %}

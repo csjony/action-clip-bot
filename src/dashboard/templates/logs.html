@@ -1,8 +1,15 @@
 {% extends "base.html" %}
 
 {% block title %}Logs — Action Clip Bot{% endblock %}
+{% block crumb %}Logs{% endblock %}
 
 {% block content %}
+<div class="page-head">
+  <div>
+    <h1>Logs</h1>
+    <p class="muted page-sub">Dashboard output and GPU server logs, streamed live.</p>
+  </div>
+</div>
 <style>
   .logs-container {
     display: flex;
@@ -45,8 +52,8 @@
   }
   
   .source-tab:hover {
-    color: #fff;
-    background: rgba(255, 255, 255, 0.04);
+    color: var(--text);
+    background: #f1f3f4;
   }
   
   .source-tab.active {

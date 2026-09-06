@@ -1,21 +1,31 @@
 {% extends "base.html" %}
 {% block title %}Run details — Action Clip Bot{% endblock %}
+{% block crumb %}Run detail{% endblock %}
 {% block content %}
-<h1>Execution Run Details</h1>
-<p class="muted" style="margin-bottom: 2rem;">Real-time event logging stream for the selected generation run sequence.</p>
+<div class="page-head">
+  <div>
+    <h1>Execution Run Details</h1>
+    <p class="muted page-sub">Real-time event stream for this generation run.</p>
+  </div>
+  <div class="page-actions">
+    <a href="/runs" class="btn btn-sm btn-secondary">← All runs</a>
+  </div>
+</div>
 
 {% if run_state %}
-<div class="card" style="margin-bottom: 2rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem;">
+<div class="card" style="margin-bottom: 1rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem;">
   <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
     <span class="muted">Run ID:</span>
     <code>{{ run_id }}</code>
-    
-    {% if run_state.status == "running" %}
-      <span class="badge badge-running">🔄 Running</span>
+
+    {% if run_state.status == "running" or run_state.status == "cancelling" %}
+      <span class="badge badge-running">🔄 {{ run_state.status | title }}</span>
     {% elif run_state.status == "finished" %}
       <span class="badge badge-ok">✅ Finished (exit {{ run_state.exit_code }})</span>
     {% elif run_state.status == "failed" %}
       <span class="badge badge-fail">❌ Failed{% if run_state.error %}: {{ run_state.error[:200] }}{% endif %}</span>
+    {% elif run_state.status == "cancelled" %}
+      <span class="badge badge-warn">🛑 Cancelled</span>
     {% else %}
       <span class="badge">{{ run_state.status }}</span>
     {% endif %}
@@ -33,8 +43,9 @@
 </div>
 {% endif %}
 
-<h2>Event Execution Log Stream</h2>
-<div class="timeline" id="timeline" style="margin-bottom: 2.5rem;">
+<h2>Event Log Stream</h2>
+<p class="muted" id="poll-status" aria-live="polite" style="font-size:0.85rem;">Live updates every 2s while the run is active.</p>
+<div class="timeline" id="timeline" style="margin-bottom: 1.25rem;" aria-live="polite">
 {% if events %}
 {% for e in events %}
 <div class="event event-{{ e.kind }}" data-id="{{ e.id }}">
@@ -43,11 +54,11 @@
   {% if e.provider %}<span class="event-provider">⚡ {{ e.provider }}</span>{% endif %}
   {% if e.scene_index is not none %}<span class="event-scene">🎬 Clip {{ e.scene_index }}{% if e.total_scenes %}/{{ e.total_scenes }}{% endif %}</span>{% endif %}
   {% if e.elapsed_ms %}<span class="event-elapsed">⏱️ {{ fmt_duration_ms(e.elapsed_ms) }}</span>{% endif %}
-  <span class="event-msg">{{ e.message }}</span>
+  <span class="event-msg">{{ e.message | e }}</span>
 </div>
 {% endfor %}
 {% else %}
-<p class="muted" id="no-events" style="padding: 2rem; text-align: center;">Waiting for incoming events...</p>
+<p class="muted empty-state" id="no-events">Waiting for incoming events…</p>
 {% endif %}
 </div>
 
@@ -56,54 +67,92 @@
 
 {% block scripts %}
 <script>
-// Live polling for in-progress runs
 (function() {
-  const runId = "{{ run_id }}";
+  const runId = {{ run_id | tojson }};
   let lastId = {{ events[-1].id if events else 0 }};
   const timeline = document.getElementById('timeline');
   const noEvents = document.getElementById('no-events');
+  const pollStatus = document.getElementById('poll-status');
+  let failures = 0;
+
+  function addEvent(e) {
+    lastId = e.id;
+    if (noEvents) noEvents.remove();
+    const div = document.createElement('div');
+    div.className = 'event event-' + e.kind;
+    div.dataset.id = e.id;
+
+    const time = document.createElement('span');
+    time.className = 'event-time';
+    time.textContent = e.ts ? e.ts.substring(0, 19).replace('T', ' ') : '';
+    const kind = document.createElement('span');
+    kind.className = 'event-kind badge badge-dry';
+    kind.style.cssText = 'text-transform: uppercase; font-size: 0.7rem; padding: 1px 6px;';
+    kind.textContent = e.kind;
+    div.append(time, kind);
+
+    if (e.provider) {
+      const p = document.createElement('span');
+      p.className = 'event-provider';
+      p.textContent = '⚡ ' + e.provider;
+      div.appendChild(p);
+    }
+    if (e.scene_index != null) {
+      const s = document.createElement('span');
+      s.className = 'event-scene';
+      s.textContent = '🎬 Clip ' + e.scene_index + (e.total_scenes ? '/' + e.total_scenes : '');
+      div.appendChild(s);
+    }
+    if (e.elapsed_ms) {
+      const el = document.createElement('span');
+      el.className = 'event-elapsed';
+      el.textContent = '⏱️ ' + formatMs(e.elapsed_ms);
+      div.appendChild(el);
+    }
+    const msg = document.createElement('span');
+    msg.className = 'event-msg';
+    msg.textContent = e.message || '';
+    div.appendChild(msg);
+
+    timeline.appendChild(div);
+    div.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
 
   function poll() {
-    fetch(`/api/runs/${runId}/events?after_id=${lastId}`)
-      .then(r => r.json())
-      .then(data => {
-        if (data.events && data.events.length > 0) {
-          if (noEvents) noEvents.remove();
-          data.events.forEach(e => {
-            lastId = e.id;
-            const div = document.createElement('div');
-            div.className = `event event-${e.kind}`;
-            div.dataset.id = e.id;
-            div.innerHTML = `
-              <span class="event-time">${e.ts ? e.ts.substring(0,19).replace('T', ' ') : ''}</span>
-              <span class="event-kind badge badge-dry" style="text-transform: uppercase; font-size: 0.7rem; padding: 1px 6px;">${e.kind}</span>
-              ${e.provider ? `<span class="event-provider">⚡ ${e.provider}</span>` : ''}
-              ${e.scene_index != null ? `<span class="event-scene">🎬 Clip ${e.scene_index}${e.total_scenes ? '/'+e.total_scenes : ''}</span>` : ''}
-              ${e.elapsed_ms ? `<span class="event-elapsed">⏱️ ${formatMs(e.elapsed_ms)}</span>` : ''}
-              <span class="event-msg">${e.message || ''}</span>
-            `;
-            timeline.appendChild(div);
-            div.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-          });
-        }
-        // Keep polling if run is still active
-        if (data.status === 'running') {
-          setTimeout(poll, 2000);
-        }
+    fetch(`/api/runs/${encodeURIComponent(runId)}/events?after_id=${lastId}`)
+      .then((r) => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
       })
-      .catch(() => setTimeout(poll, 5000));
+      .then((data) => {
+        failures = 0;
+        (data.events || []).forEach(addEvent);
+        const active = data.status === 'running' || data.status === 'cancelling';
+        if (pollStatus) {
+          pollStatus.textContent = active
+            ? 'Live updates every 2s — run is active.'
+            : 'Run ended (' + (data.status || 'unknown') + '). Polling stopped.';
+        }
+        if (active) setTimeout(poll, 2000);
+      })
+      .catch(() => {
+        failures += 1;
+        const backoff = Math.min(15000, 2000 * failures);
+        if (pollStatus) pollStatus.textContent = 'Connection lost — retrying…';
+        setTimeout(poll, backoff);
+      });
   }
 
   function formatMs(ms) {
     const s = ms / 1000;
     if (s < 60) return s.toFixed(1) + 's';
-    return Math.floor(s/60) + 'm ' + Math.floor(s%60) + 's';
+    return Math.floor(s / 60) + 'm ' + Math.floor(s % 60) + 's';
   }
 
-  // Auto-poll if we think the run might still be active
-  const statusBadge = document.querySelector('.badge-running');
-  if (statusBadge) {
+  if (document.querySelector('.badge-running')) {
     poll();
+  } else if (pollStatus) {
+    pollStatus.textContent = 'Showing recorded events. Run is not active.';
   }
 })();
 </script>

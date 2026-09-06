@@ -1,17 +1,26 @@
 {% extends "base.html" %}
 {% block title %}Pipeline Runs — Action Clip Bot{% endblock %}
+{% block crumb %}Runs{% endblock %}
 {% block content %}
-<h1>Pipeline Run History</h1>
-<p class="muted" style="margin-bottom: 2rem;">Track automated scriptwriting, scene narration, video clip rendering, and compilation execution states.</p>
+<div class="page-head">
+  <div>
+    <h1>Pipeline Run History</h1>
+    <p class="muted page-sub">Scriptwriting, rendering and compilation runs with live status.</p>
+  </div>
+  <div class="page-actions">
+    <input type="search" class="table-filter" data-table-filter="runs-table" placeholder="Filter runs…" aria-label="Filter runs">
+    <a href="/generate" class="btn btn-sm">+ New video</a>
+  </div>
+</div>
 
 {% if is_busy %}
 <div class="card card-warn" style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1.5rem; padding:1.25rem;">
   <div>
-    <span style="color:var(--warn); font-weight:700; font-size:1.1rem; display:block; margin-bottom:0.25rem;">🔄 Run In Progress</span>
+    <span style="color:var(--warn); font-weight:500; font-size:1.05rem; display:block; margin-bottom:0.25rem;">Run in progress</span>
     <span class="muted" style="font-size:0.85rem;">Active run: <code>{{ current_run_id[:16] if current_run_id else '' }}…</code></span>
   </div>
   <button id="stop-btn" class="btn btn-danger" onclick="stopRun()" style="min-width:140px;">
-    🛑 Stop Run
+    Stop run
   </button>
 </div>
 <p id="stop-msg" class="card muted" style="display:none; margin-bottom:1.5rem; border-color:var(--warn); color:var(--warn); font-weight:600;"></p>
@@ -19,14 +28,14 @@
 
 {% if runs %}
 <div class="table-container">
-  <table>
+  <table id="runs-table">
     <thead>
       <tr><th>Started Time</th><th>Status</th><th>Event Logs</th><th>Target Post</th><th>Actions</th></tr>
     </thead>
     <tbody>
     {% for r in runs %}
       <tr>
-        <td style="font-family: monospace; color: var(--text-muted);">{{ r.started_at[:19] if r.started_at else "—" }}</td>
+        <td style="font-family: monospace; color: var(--text-muted);" title="{{ r.started_at or '' }}">{{ r.started_at[:19] if r.started_at else "—" }}</td>
         <td>
           {% if r.latest_kind == "run_finished" %}
             <span class="badge badge-ok">✅ Finished</span>
@@ -53,7 +62,11 @@
   </table>
 </div>
 {% else %}
-<p class="muted">No execution runs recorded yet.</p>
+<div class="empty-state">
+  <div class="empty-icon">📭</div>
+  <p class="muted">No execution runs recorded yet.</p>
+  <a href="/generate" class="btn" style="margin-top:1rem;">Generate your first video →</a>
+</div>
 {% endif %}
 
 <script>
@@ -62,24 +75,27 @@ async function stopRun() {
   const msg = document.getElementById('stop-msg');
   if (!confirm('Stop the current run after its active scene finishes? Clips already generated will be kept.')) return;
   btn.disabled = true;
-  btn.textContent = '⏳ Stopping…';
+  btn.textContent = 'Stopping…';
   try {
     const res = await fetch('/runs/stop', { method: 'POST' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     msg.textContent = data.message;
     msg.style.display = 'block';
+    toast(data.message, data.ok ? 'success' : 'warn');
     if (data.ok) {
-      btn.textContent = '🛑 Stop Sent';
+      btn.textContent = 'Stop sent';
       btn.style.background = 'var(--warn)';
     } else {
       btn.disabled = false;
-      btn.textContent = '🛑 Stop Run';
+      btn.textContent = 'Stop run';
     }
   } catch (e) {
-    msg.textContent = 'Error sending stop signal.';
+    msg.textContent = 'Error sending stop signal: ' + e.message;
     msg.style.display = 'block';
+    toast('Error sending stop signal.', 'error');
     btn.disabled = false;
-    btn.textContent = '🛑 Stop Run';
+    btn.textContent = 'Stop run';
   }
 }
 </script>

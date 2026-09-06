@@ -1,7 +1,13 @@
 {% extends "base.html" %}
 {% block title %}Usage & Cost Observatory — Action Clip Bot{% endblock %}
+{% block crumb %}Usage{% endblock %}
 {% block content %}
-<h1>Usage & Cost Observatory</h1>
+<div class="page-head">
+  <div>
+    <h1>Usage & Cost Observatory</h1>
+    <p class="muted page-sub">Spend, credits and per-account API usage.</p>
+  </div>
+</div>
 
 <div class="cards">
   <div class="card" style="grid-column: span 2;">
@@ -89,12 +95,12 @@
 </div>
 
 <!-- Detail panel (hidden until account selected) -->
-<div id="usage-detail-panel" style="display:none; margin-top: 2rem;"></div>
+<div id="usage-detail-panel" style="display:none; margin-top: 1.25rem;"></div>
 
 <!-- Empty / placeholder state -->
 <div id="usage-placeholder" style="margin-top: 2.5rem; text-align: center; padding: 3.5rem 2rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg);">
   <div style="font-size: 3rem; margin-bottom: 1rem; opacity: 0.4;">📊</div>
-  <p style="color: var(--text-muted); margin: 0; font-size: 1rem;">Select a <strong style="color:#fff;">Provider</strong> and then an <strong style="color:#fff;">Account</strong> above to inspect its API usage metrics.</p>
+  <p style="color: var(--text-muted); margin: 0; font-size: 1rem;">Select a <strong style="color:var(--text);">Provider</strong> and then an <strong style="color:var(--text);">Account</strong> above to inspect its API usage metrics.</p>
 </div>
 
 {% endblock %}
@@ -298,7 +304,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!providerSel.value) {
         placeholder.innerHTML = `
           <div style="font-size: 3rem; margin-bottom: 1rem; opacity: 0.4;">📊</div>
-          <p style="color: var(--text-muted); margin: 0; font-size: 1rem;">Select a <strong style="color:#fff;">Provider</strong> and then an <strong style="color:#fff;">Account</strong> above to inspect its API usage metrics.</p>
+          <p style="color: var(--text-muted); margin: 0; font-size: 1rem;">Select a <strong style="color:var(--text);">Provider</strong> and then an <strong style="color:var(--text);">Account</strong> above to inspect its API usage metrics.</p>
         `;
         placeholder.style.display = "block";
       }
@@ -323,7 +329,7 @@ document.addEventListener("DOMContentLoaded", () => {
       detailPanel.style.display = "none";
       placeholder.innerHTML = `
         <div style="font-size: 3rem; margin-bottom: 1rem; opacity: 0.4;">📊</div>
-        <p style="color: var(--text-muted); margin: 0; font-size: 1rem;">Select a <strong style="color:#fff;">Provider</strong> and then an <strong style="color:#fff;">Account</strong> above.</p>
+        <p style="color: var(--text-muted); margin: 0; font-size: 1rem;">Select a <strong style="color:var(--text);">Provider</strong> and then an <strong style="color:var(--text);">Account</strong> above.</p>
       `;
       placeholder.style.display = "block";
       return;
@@ -405,7 +411,7 @@ document.addEventListener("DOMContentLoaded", () => {
 .custom-select {
   appearance: none;
   -webkit-appearance: none;
-  background: rgba(0,0,0,0.3);
+  background: #fff;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   color: var(--text);
@@ -447,9 +453,9 @@ document.addEventListener("DOMContentLoaded", () => {
 }
 .detail-title {
   font-family: var(--font-title);
-  font-size: 1.6rem;
-  font-weight: 700;
-  color: #fff;
+  font-size: 1.4rem;
+  font-weight: 500;
+  color: var(--text);
   margin-bottom: 0.4rem;
 }
 .detail-meta {
@@ -463,13 +469,13 @@ document.addEventListener("DOMContentLoaded", () => {
 .detail-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
-  gap: 1.25rem;
+  gap: 1rem;
 }
 .detail-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 1.25rem 1.5rem;
+  padding: 1rem 1.25rem;
   box-shadow: var(--shadow-sm);
   transition: transform 0.25s ease, border-color 0.25s ease;
 }
@@ -491,9 +497,9 @@ document.addEventListener("DOMContentLoaded", () => {
 }
 .detail-card-value {
   font-family: var(--font-title);
-  font-size: 2rem;
-  font-weight: 700;
-  color: #fff;
+  font-size: 1.75rem;
+  font-weight: 500;
+  color: var(--text);
   margin-bottom: 0.25rem;
   line-height: 1.1;
 }
