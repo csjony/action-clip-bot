@@ -309,9 +309,10 @@
   // Setup live refresh interval
   function setupRefresh() {
     if (refreshInterval) clearInterval(refreshInterval);
-    
+
     if (document.getElementById('autoRefresh').checked) {
-      refreshInterval = setInterval(() => fetchLogs(false), 1500);
+      const ms = (window.DASHBOARD_UI && window.DASHBOARD_UI.logs_poll_ms) || 1500;
+      refreshInterval = setInterval(() => fetchLogs(false), ms);
     }
   }
 

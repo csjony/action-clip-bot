@@ -50,9 +50,27 @@ def _app_version() -> str:
 APP_VERSION = _app_version()
 
 
+def _dash_cfg() -> dict:
+    """UI tunables from settings.yaml `dashboard:` (editable on Settings page)."""
+    cfg = get_settings().get("dashboard", {}) or {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
 def _base_context(request: Request, active_page: str) -> dict:
     """Shared template vars so every page gets nav state + version for free."""
-    return {"request": request, "active_page": active_page, "app_version": APP_VERSION}
+    cfg = _dash_cfg()
+    return {
+        "request": request,
+        "active_page": active_page,
+        "app_version": APP_VERSION,
+        # Live JS timings — templates/JS read these instead of hardcoded ms.
+        "ui": {
+            "event_poll_ms": int(cfg.get("event_poll_sec", 2)) * 1000,
+            "event_backoff_max_ms": int(cfg.get("event_backoff_max_sec", 15)) * 1000,
+            "logs_poll_ms": int(cfg.get("logs_poll_ms", 1500)),
+            "toast_ms": int(cfg.get("toast_ms", 3500)),
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +323,7 @@ async def index(request: Request):
     except Exception:
         current_run = None
     try:
-        runs = store.list_runs(limit=5)
+        runs = store.list_runs(limit=int(_dash_cfg().get("index_runs", 5)))
     except Exception:
         log.exception("failed to list runs")
         runs = []
@@ -329,9 +347,10 @@ async def index(request: Request):
         from datetime import timedelta
 
         today = datetime.now(timezone.utc).date()
-        days = [today - timedelta(days=i) for i in range(13, -1, -1)]
+        window = max(2, int(_dash_cfg().get("activity_days", 14)))
+        days = [today - timedelta(days=i) for i in range(window - 1, -1, -1)]
         counts = {d.isoformat(): 0 for d in days}
-        for r in store.list_runs(limit=500):
+        for r in store.list_runs(limit=int(_dash_cfg().get("activity_runs", 500))):
             started = (r.get("started_at") or "")[:10]
             if started in counts:
                 counts[started] += 1
@@ -386,12 +405,16 @@ async def accounts_page(request: Request):
     for a in all_accounts:
         accounts_by_provider[a["provider"]].append(a)
     
+    cfg = _dash_cfg()
     return templates.TemplateResponse(request, "accounts.html", {
         **_base_context(request, "accounts"),
         "accounts": all_accounts,
         "accounts_by_provider": dict(accounts_by_provider),
         "provider_groups": provider_groups,
         "provider_info": PROVIDER_INFO,
+        "api_key_max": int(cfg.get("api_key_max", 4000)),
+        "label_max": int(cfg.get("label_max", 64)),
+        "email_max": int(cfg.get("email_max", 254)),
     })
 
 
@@ -402,19 +425,22 @@ async def account_add(
     label: str = Form(...),
     email: str = Form(default=""),
     api_key: str = Form(...),
-    priority: int = Form(default=100),
+    priority: int | None = Form(default=None),
     enabled: bool = Form(default=True),
 ):
-    provider = (provider or "").strip().lower()[:64]
-    label = (label or "").strip()[:64]
-    email = (email or "").strip()[:254]
+    cfg = _dash_cfg()
+    if priority is None:
+        priority = int(cfg.get("priority_default", 100))
+    provider = (provider or "").strip().lower()[:int(cfg.get("label_max", 64))]
+    label = (label or "").strip()[:int(cfg.get("label_max", 64))]
+    email = (email or "").strip()[:int(cfg.get("email_max", 254))]
     api_key = (api_key or "").strip()
     if not provider or not label or not api_key:
         raise HTTPException(400, "Provider, label and API key are all required.")
-    if len(api_key) > 4000:
-        raise HTTPException(400, "API key is too long (max 4000 chars).")
-    if priority < 0 or priority > 9999:
-        raise HTTPException(400, "Priority must be 0–9999.")
+    if len(api_key) > int(cfg.get("api_key_max", 4000)):
+        raise HTTPException(400, f"API key is too long (max {cfg.get('api_key_max', 4000)} chars).")
+    if priority < int(cfg.get("priority_min", 0)) or priority > int(cfg.get("priority_max", 9999)):
+        raise HTTPException(400, "Priority out of allowed range.")
     acct_store.add(provider, label, api_key, email=email or None, extra=None,
                    enabled=enabled, priority=priority)
     # Clear providers config cache so the pool picks up new accounts
@@ -443,7 +469,10 @@ async def account_delete(account_id: int):
 
 # --- Runs ---
 @app.get("/runs", response_class=HTMLResponse)
-async def runs_page(request: Request, limit: int = Query(default=50, le=200)):
+async def runs_page(request: Request,
+                    limit: int = Query(default=50, le=200)):
+    cfg = _dash_cfg()
+    limit = max(1, min(limit, int(cfg.get("history_max", 200))))
     runs = store.list_runs(limit=limit)
     return templates.TemplateResponse(request, "runs.html", {
         **_base_context(request, "runs"),
@@ -464,7 +493,7 @@ async def runs_stop():
 
 @app.get("/runs/{run_id}", response_class=HTMLResponse)
 async def run_detail(request: Request, run_id: str):
-    run_id = (run_id or "").strip()[:64]
+    run_id = (run_id or "").strip()[:int(_dash_cfg().get("run_id_max", 64))]
     all_events = store.list_events(run_id)
     # Also check runner state
     run_state = runner.get_run(run_id)
@@ -480,7 +509,9 @@ async def run_detail(request: Request, run_id: str):
 
 # --- Posts ---
 @app.get("/posts", response_class=HTMLResponse)
-async def posts_page(request: Request, limit: int = Query(default=50, le=200)):
+async def posts_page(request: Request,
+                     limit: int = Query(default=50, le=200)):
+    limit = max(1, min(limit, int(_dash_cfg().get("history_max", 200))))
     try:
         with store._lock:
             rows = store._conn.execute(
@@ -525,6 +556,7 @@ def _generate_error(request: Request, error: str, script_json: str):
         "current_run_id": runner.current_run_id,
         "error": error,
         "script_json": script_json,
+        "script_json_max": int(_dash_cfg().get("script_json_max", 200000)),
     })
 
 
@@ -540,6 +572,7 @@ async def generate_page(request: Request):
         "current_run_id": runner.current_run_id,
         "error": None,
         "script_json": "",
+        "script_json_max": int(_dash_cfg().get("script_json_max", 200000)),
     })
 
 
@@ -561,8 +594,9 @@ async def generate_submit(
     if not script_json_clean:
         return _generate_error(request, "Manual Script JSON is required to start a run.", "")
 
-    if len(script_json_clean) > 200_000:
-        return _generate_error(request, "Script JSON is too large (max 200 KB).", script_json)
+    json_max = int(_dash_cfg().get("script_json_max", 200000))
+    if len(script_json_clean) > json_max:
+        return _generate_error(request, f"Script JSON is too large (max {json_max} chars).", script_json)
 
     # Quick validation
     try:
@@ -594,15 +628,12 @@ async def generate_submit(
 async def usage_page(request: Request):
     providers_cfg = get_providers_config()
     provider_names = providers_cfg.get("order", [])
-    from src.generators.pool import _DEFAULT_CAPS
-    caps = _DEFAULT_CAPS
+    from src.generators.pool import _credit_spec
 
     # Per-provider credit usage this period
     credit_data = []
     for prov in provider_names:
-        cap_info = caps.get(prov, {})
-        kind = cap_info.get("kind", "daily")
-        cap = cap_info.get("cap", 0)
+        kind, cap = _credit_spec(providers_cfg, prov)
         remaining = store.credit_remaining(prov, kind, cap)
         used = cap - remaining
         accounts = acct_store.list_all(prov)
@@ -637,7 +668,8 @@ async def logs_page(request: Request, source: str = "dashboard"):
 
 @app.get("/api/logs")
 async def api_logs(source: str = "dashboard", limit: int = 500):
-    limit = max(50, min(limit, 2000))
+    cfg = _dash_cfg()
+    limit = max(int(cfg.get("log_min", 50)), min(limit, int(cfg.get("log_max", 2000))))
     if source == "dashboard":
         log_file = PROJECT_ROOT / "data" / "dashboard.log"
         if not log_file.exists():
@@ -659,7 +691,8 @@ async def api_logs(source: str = "dashboard", limit: int = 500):
         try:
             import httpx
             headers = {"Authorization": f"Bearer {runpod_key}"}
-            r = httpx.get(f"https://rest.runpod.io/v1/pods/{runpod_id}", headers=headers, timeout=5.0)
+            r = httpx.get(f"https://rest.runpod.io/v1/pods/{runpod_id}", headers=headers,
+                          timeout=float(cfg.get("log_fetch_timeout_sec", 5.0)))
             if r.status_code != 200:
                 return {"content": f"Failed to fetch pod details from RunPod (status {r.status_code})."}
             pod_info = r.json()
@@ -677,12 +710,13 @@ async def api_logs(source: str = "dashboard", limit: int = 500):
             cmd = [
                 "ssh",
                 "-o", "StrictHostKeyChecking=no",
-                "-o", "ConnectTimeout=5",
+                "-o", f"ConnectTimeout={cfg.get('log_ssh_timeout_sec', 5)}",
                 "-p", str(ssh_port),
                 f"root@{public_ip}",
                 f"tail -n {limit} /workspace/gpu_server.log 2>/dev/null || echo 'No gpu_server.log file found on remote volume.'"
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            res = subprocess.run(cmd, capture_output=True, text=True,
+                                 timeout=int(cfg.get("log_ssh_cmd_sec", 10)))
             if res.returncode != 0:
                 return {"content": f"Failed to connect to GPU Pod via SSH (exit code {res.returncode}):\n{res.stderr}"}
             return {"content": res.stdout}
@@ -691,6 +725,158 @@ async def api_logs(source: str = "dashboard", limit: int = 500):
             
     else:
         return {"content": "Invalid log source specified."}
+
+
+# ---------------------------------------------------------------------------
+# Settings — every tunable in one place (no code edits needed)
+# ---------------------------------------------------------------------------
+# Fields whose live value can be forced by an env var (file/UI value loses).
+ENV_WINS = {
+    "budget.monthly_cap_usd": "BUDGET_CAP",
+    "whisper.model": "WHISPER_MODEL",
+    "runpod.default_model": "WAN_MODEL_ID",
+}
+
+
+def _settings_file_defaults() -> dict:
+    """settings.yaml values WITHOUT dashboard overrides (for the UI)."""
+    from src.config import _load_yaml
+    from src.dashboard.settings_spec import all_keys
+    raw = _load_yaml("settings.yaml")
+    out: dict = {}
+    for key in all_keys():
+        node = raw
+        ok = True
+        for part in key.split("."):
+            if isinstance(node, dict) and part in node:
+                node = node[part]
+            else:
+                ok = False
+                break
+        if ok:
+            out[key] = node
+    return out
+
+
+def _settings_view_model() -> list[dict]:
+    """Groups with per-field file/effective values + overridden flags."""
+    from src.dashboard.settings_spec import SPEC
+    file_defaults = _settings_file_defaults()
+    try:
+        overridden = {r["key"] for r in store.list_overrides()}
+    except Exception:
+        overridden = set()
+    settings = get_settings()
+    groups = []
+    for g in SPEC:
+        fields = []
+        for f in g["fields"]:
+            spec_default = f.get("default")
+            file_default = file_defaults.get(f["key"], spec_default)
+            effective = settings.get(f["key"], file_default)
+            fields.append({
+                **f,
+                "file_default": file_default,
+                "effective": effective,
+                "overridden": f["key"] in overridden,
+                "env_var": ENV_WINS.get(f["key"]),
+            })
+        groups.append({"group": g["group"], "desc": g.get("desc", ""), "fields": fields})
+    return groups
+
+
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request, saved: int = Query(default=0),
+                        error: str = Query(default="")):
+    return templates.TemplateResponse(request, "settings.html", {
+        **_base_context(request, "settings"),
+        "groups": _settings_view_model(),
+        "saved": saved,
+        "error": error or None,
+    })
+
+
+@app.post("/settings/save", response_class=HTMLResponse)
+async def settings_save(request: Request):
+    from src.dashboard.settings_spec import SPEC
+    import json as _json
+    form = await request.form()
+    file_defaults = _settings_file_defaults()
+    errors: list[str] = []
+    changed = 0
+    for g in SPEC:
+        for f in g["fields"]:
+            key = f["key"]
+            ftype = f.get("type", "text")
+            raw_val = form.get(f"v:{key}")
+            try:
+                if ftype == "bool":
+                    # Unchecked checkboxes are absent from the form. Compare
+                    # against the rendered current state (cur:<key>) so an
+                    # untouched toggle never writes a spurious override —
+                    # this holds even without the page's JS dirtiness filter.
+                    # (With JS, both v: and cur: are disabled when untouched.)
+                    submitted = raw_val in ("on", "true", "1", "yes")
+                    current_raw = form.get(f"cur:{key}")
+                    if current_raw is None:
+                        if raw_val is None:
+                            continue
+                        value = submitted
+                    else:
+                        current = current_raw in ("on", "true", "1", "yes", "True")
+                        if submitted == current:
+                            continue
+                        value = submitted
+                elif raw_val is None or str(raw_val).strip() == "":
+                    continue  # untouched — leave as-is
+                elif ftype == "int":
+                    value = int(str(raw_val).strip())
+                elif ftype == "float":
+                    value = float(str(raw_val).strip())
+                elif ftype == "list":
+                    value = [ln.strip() for ln in str(raw_val).splitlines() if ln.strip()]
+                else:
+                    value = str(raw_val).strip()
+                    if ftype == "select" and f.get("options") and value not in f["options"]:
+                        raise ValueError(f"must be one of: {', '.join(f['options'])}")
+                if ftype in ("int", "float"):
+                    if f.get("min") is not None and value < f["min"]:
+                        raise ValueError(f"must be ≥ {f['min']}")
+                    if f.get("max") is not None and value > f["max"]:
+                        raise ValueError(f"must be ≤ {f['max']}")
+            except (ValueError, TypeError) as exc:
+                errors.append(f"{f.get('label', key)}: {exc}")
+                continue
+            file_default = file_defaults.get(key, f.get("default"))
+            if value == file_default:
+                if store.delete_override(key):
+                    changed += 1
+            else:
+                store.set_override(key, _json.dumps(value))
+                changed += 1
+    get_settings.cache_clear()
+    if errors:
+        return RedirectResponse(url="/settings?error=" + "; ".join(errors)[:300], status_code=303)
+    return RedirectResponse(url="/settings?saved=1", status_code=303)
+
+
+@app.post("/settings/reset", response_class=HTMLResponse)
+async def settings_reset(request: Request):
+    """Delete overrides: scope=all, or scope=group:<name>, or a single key."""
+    form = await request.form()
+    scope = str(form.get("scope", "all"))
+    from src.dashboard.settings_spec import SPEC
+    if scope == "all":
+        keys = [f["key"] for g in SPEC for f in g["fields"]]
+    elif scope.startswith("group:"):
+        name = scope[len("group:"):]
+        keys = [f["key"] for g in SPEC if g["group"] == name for f in g["fields"]]
+    else:
+        keys = [scope]
+    for k in keys:
+        store.delete_override(k)
+    get_settings.cache_clear()
+    return RedirectResponse(url="/settings?saved=1", status_code=303)
 
 
 # ---------------------------------------------------------------------------
@@ -810,13 +996,10 @@ async def api_usage_stats(
 @app.get("/api/usage")
 async def api_usage():
     providers_cfg = get_providers_config()
-    from src.generators.pool import _DEFAULT_CAPS
-    caps = _DEFAULT_CAPS
+    from src.generators.pool import _credit_spec
     data = []
     for prov in providers_cfg.get("order", []):
-        ci = caps.get(prov, {})
-        kind = ci.get("kind", "daily")
-        cap = ci.get("cap", 0)
+        kind, cap = _credit_spec(providers_cfg, prov)
         remaining = store.credit_remaining(prov, kind, cap)
         data.append({"provider": prov, "kind": kind, "cap": cap, "remaining": remaining})
     return {

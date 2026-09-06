@@ -46,13 +46,13 @@
     <!-- Standard fields -->
     <div class="form-row" style="margin-top: 1rem;">
       <label for="acct-label"><span class="label-title">Label / Name <span class="required-mark" aria-hidden="true">*</span></span>
-        <input id="acct-label" type="text" name="label" placeholder="e.g. main-key, backup-key" required maxlength="64">
+        <input id="acct-label" type="text" name="label" placeholder="e.g. main-key, backup-key" required maxlength="{{ label_max | default(64) }}">
       </label>
       <label for="acct-email">Email (Optional)
-        <input id="acct-email" type="email" name="email" placeholder="registered-email@domain.com" maxlength="254">
+        <input id="acct-email" type="email" name="email" placeholder="registered-email@domain.com" maxlength="{{ email_max | default(254) }}">
       </label>
       <label for="acct-key"><span class="label-title">API Key or URL <span class="required-mark" aria-hidden="true">*</span></span>
-        <input id="acct-key" type="text" name="api_key" placeholder="Paste credential secret or local endpoint url" required maxlength="4000" style="font-family: monospace;" autocomplete="off">
+        <input id="acct-key" type="text" name="api_key" placeholder="Paste credential secret or local endpoint url" required maxlength="{{ api_key_max | default(4000) }}" style="font-family: monospace;" autocomplete="off">
         <span class="field-hint">Stored locally in SQLite. Never commit it to git.</span>
       </label>
     </div>

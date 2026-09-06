@@ -68,7 +68,7 @@
 
       <div class="form-row">
         <label for="script_json_box">Script JSON
-          <textarea id="script_json_box" name="script_json" rows="12" required maxlength="200000" placeholder='Paste your ChatGPT/Gemini/Claude output JSON here...' class="mono-area">{{ script_json or "" }}</textarea>
+          <textarea id="script_json_box" name="script_json" rows="12" required maxlength="{{ script_json_max | default(200000) }}" placeholder='Paste your ChatGPT/Gemini/Claude output JSON here...' class="mono-area">{{ script_json or "" }}</textarea>
           <span class="field-hint"><span id="json_status" aria-live="polite">Waiting for input…</span> · <span id="json_count">0</span> chars</span>
         </label>
       </div>

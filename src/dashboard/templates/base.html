@@ -48,6 +48,10 @@
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3h12v14H4zm2 2v2h8V5zm0 4v2h8V9zm0 4v2h5v-2z" fill="currentColor"/></svg>
         <span>Logs</span>
       </a>
+      <a href="/settings" class="side-link {% if active_page == 'settings' %}active{% endif %}" {% if active_page == 'settings' %}aria-current="page"{% endif %}>
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 7a3 3 0 100 6 3 3 0 000-6zm8 3a7 7 0 01-.2 1.6l2 1.6-2 3.4-2.4-1a7 7 0 01-2.7 1.6L12.3 19h-4l-.4-2.8a7 7 0 01-2.7-1.6l-2.4 1-2-3.4 2-1.6A7 7 0 012 10c0-.5.1-1.1.2-1.6l-2-1.6 2-3.4 2.4 1a7 7 0 012.7-1.6L7.7 1h4l.4 2.8a7 7 0 012.7 1.6l2.4-1 2 3.4-2 1.6c.1.5.2 1 .2 1.6z" fill="currentColor"/></svg>
+        <span>Settings</span>
+      </a>
     </nav>
     <div class="side-foot">
       <a href="/healthz" class="health-line" title="Liveness probe">
@@ -61,7 +65,7 @@
     <header class="topbar">
       <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="sidebar" aria-label="Open navigation">☰</button>
       <nav class="crumbs" aria-label="Breadcrumb">
-        <span class="crumb-section">{% if active_page in ['dashboard', 'generate'] %}Create{% elif active_page in ['runs', 'posts'] %}Manage{% elif active_page in ['accounts', 'usage', 'logs'] %}Configure{% else %}Action Clip Bot{% endif %}</span>
+        <span class="crumb-section">{% if active_page in ['dashboard', 'generate'] %}Create{% elif active_page in ['runs', 'posts'] %}Manage{% elif active_page in ['accounts', 'usage', 'logs', 'settings'] %}Configure{% else %}Action Clip Bot{% endif %}</span>
         <span class="crumb-sep" aria-hidden="true">/</span>
         <span class="crumb-page">{% block crumb %}Dashboard{% endblock %}</span>
       </nav>
@@ -83,6 +87,7 @@
   </div>
 </div>
 <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="false"></div>
+<script>window.DASHBOARD_UI = {{ ui | default({'event_poll_ms': 2000, 'event_backoff_max_ms': 15000, 'logs_poll_ms': 1500, 'toast_ms': 3500}) | tojson }};</script>
 <script src="/static/dash.js" defer></script>
 {% block scripts %}{% endblock %}
 </body>

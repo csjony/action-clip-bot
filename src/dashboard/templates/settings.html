@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Settings — Action Clip Bot{% endblock %}
+{% block crumb %}Settings{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Settings</h1>
+    <p class="muted page-sub">Every tunable in one place — changes apply to the next run. No code edits needed.</p>
+  </div>
+  <div class="page-actions">
+    <form method="post" action="/settings/reset" onsubmit="return confirm('Reset ALL settings to file defaults?');">
+      <input type="hidden" name="scope" value="all">
+      <button type="submit" class="btn btn-sm btn-secondary">Reset all to defaults</button>
+    </form>
+  </div>
+</div>
+
+{% if saved %}
+<div class="alert alert-success" role="status">Settings saved — they apply to the next pipeline run.</div>
+{% endif %}
+{% if error %}
+<div class="alert alert-error" role="alert"><strong>Error:</strong> {{ error }}</div>
+{% endif %}
+
+<form method="post" action="/settings/save" id="settings-form">
+{% for g in groups %}
+<div class="card settings-group">
+  <div class="settings-group-head">
+    <h3>{{ g.group }}</h3>
+    {% if g.desc %}<p class="muted" style="margin:0;">{{ g.desc }}</p>{% endif %}
+  </div>
+  <div class="settings-grid">
+  {% for f in g.fields %}
+    <label class="setting" for="fld-{{ loop.index }}-{{ g.group | replace(' ', '-') }}">
+      <span class="label-title">
+        {{ f.label }}
+        {% if f.overridden %}<span class="badge badge-dry" title="Differs from settings.yaml">custom</span>{% endif %}
+        {% if f.env_var %}<span class="badge" title="{{ f.env_var }} env var overrides this value">env</span>{% endif %}
+      </span>
+      {% if f.type == "bool" %}
+        <input type="hidden" name="cur:{{ f.key }}" value="{% if f.effective %}true{% else %}false{% endif %}">
+        <input type="checkbox" id="fld-{{ loop.index }}-{{ g.group | replace(' ', '-') }}" name="v:{{ f.key }}" {% if f.effective %}checked{% endif %}>
+      {% elif f.type == "select" %}
+        <select id="fld-{{ loop.index }}-{{ g.group | replace(' ', '-') }}" name="v:{{ f.key }}">
+          {% for opt in f.options %}
+          <option value="{{ opt }}" {% if f.effective == opt %}selected{% endif %}>{{ opt }}</option>
+          {% endfor %}
+        </select>
+      {% elif f.type == "list" %}
+        <textarea id="fld-{{ loop.index }}-{{ g.group | replace(' ', '-') }}" name="v:{{ f.key }}" rows="5" class="mono-area">{{ f.effective | join('\n') if f.effective is iterable and f.effective is not string else f.effective }}</textarea>
+      {% elif f.type == "int" %}
+        <input type="number" id="fld-{{ loop.index }}-{{ g.group | replace(' ', '-') }}" name="v:{{ f.key }}" value="{{ f.effective }}"
+               {% if f.min is not none %}min="{{ f.min }}"{% endif %} {% if f.max is not none %}max="{{ f.max }}"{% endif %} step="1">
+      {% elif f.type == "float" %}
+        <input type="number" id="fld-{{ loop.index }}-{{ g.group | replace(' ', '-') }}" name="v:{{ f.key }}" value="{{ f.effective }}"
+               {% if f.min is not none %}min="{{ f.min }}"{% endif %} {% if f.max is not none %}max="{{ f.max }}"{% endif %} step="{{ f.step | default(0.1) }}">
+      {% else %}
+        <input type="text" id="fld-{{ loop.index }}-{{ g.group | replace(' ', '-') }}" name="v:{{ f.key }}" value="{{ f.effective }}">
+      {% endif %}
+      {% if f.help %}<span class="field-hint">{{ f.help }}</span>{% endif %}
+      <span class="field-hint">Default: <code>{{ f.file_default }}</code></span>
+    </label>
+  {% endfor %}
+  </div>
+</div>
+{% endfor %}
+
+<div class="settings-savebar">
+  <button type="submit" class="btn btn-primary" id="settings-save-btn">Save settings</button>
+  <span class="field-hint">Saved to the database — settings.yaml itself is never rewritten.</span>
+</div>
+</form>
+
+<script>
+// Only changed fields are submitted: unchanged inputs are disabled just
+// before submit so untouched values never create spurious overrides
+// (and untouched checkboxes are never forced to false).
+(function() {
+  const form = document.getElementById('settings-form');
+  const snapshot = new Map();
+  const val = (el) => el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value;
+  form.querySelectorAll('[name^="v:"]').forEach((el) => snapshot.set(el, val(el)));
+  const curFor = (vEl) => {
+    const key = vEl.getAttribute('name').slice(2);
+    for (const el of form.elements) {
+      if (el.getAttribute && el.getAttribute('name') === 'cur:' + key) return el;
+    }
+    return null;
+  };
+  form.addEventListener('submit', (e) => {
+    form.querySelectorAll('[name^="v:"]').forEach((el) => {
+      if (val(el) === snapshot.get(el)) {
+        el.disabled = true;
+        const cur = curFor(el);
+        if (cur) cur.disabled = true;
+      }
+    });
+    const btn = document.getElementById('settings-save-btn');
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+  });
+})();
+</script>
+{% endblock %}

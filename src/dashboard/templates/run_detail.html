@@ -69,6 +69,8 @@
 <script>
 (function() {
   const runId = {{ run_id | tojson }};
+  const POLL_MS = (window.DASHBOARD_UI && window.DASHBOARD_UI.event_poll_ms) || 2000;
+  const BACKOFF_MAX_MS = (window.DASHBOARD_UI && window.DASHBOARD_UI.event_backoff_max_ms) || 15000;
   let lastId = {{ events[-1].id if events else 0 }};
   const timeline = document.getElementById('timeline');
   const noEvents = document.getElementById('no-events');
@@ -133,11 +135,11 @@
             ? 'Live updates every 2s — run is active.'
             : 'Run ended (' + (data.status || 'unknown') + '). Polling stopped.';
         }
-        if (active) setTimeout(poll, 2000);
+        if (active) setTimeout(poll, POLL_MS);
       })
       .catch(() => {
         failures += 1;
-        const backoff = Math.min(15000, 2000 * failures);
+        const backoff = Math.min(BACKOFF_MAX_MS, POLL_MS * failures);
         if (pollStatus) pollStatus.textContent = 'Connection lost — retrying…';
         setTimeout(poll, backoff);
       });

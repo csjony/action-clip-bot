@@ -1,6 +1,17 @@
 /* dash.js — shared JS for the Action Clip Bot dashboard */
 
-function toast(message, kind = "info", timeoutMs = 3500) {
+function uiMs(key, fallback) {
+  try {
+    const v = window.DASHBOARD_UI && window.DASHBOARD_UI[key];
+    const n = parseInt(v, 10);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+
+function toast(message, kind = "info", timeoutMs = null) {
+  if (timeoutMs == null) timeoutMs = uiMs("toast_ms", 3500);
   const region = document.getElementById("toast-region");
   if (!region) {
     alert(message);
