@@ -108,6 +108,15 @@ CREATE TABLE IF NOT EXISTS api_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_api_logs_created_at ON api_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_api_logs_account_id ON api_logs(account_id);
+
+-- Dashboard-saved setting overrides (dotted key → JSON value).
+-- These win over config/settings.yaml via Settings.get(); deleting a row
+-- restores the file default. Written only from the Settings page.
+CREATE TABLE IF NOT EXISTS setting_overrides (
+    key         TEXT PRIMARY KEY,   -- e.g. 'editor.crf'
+    value       TEXT NOT NULL,      -- JSON-encoded scalar/list
+    updated_at  TEXT NOT NULL
+);
 """
 
 
@@ -171,6 +180,37 @@ class Store:
             except Exception:
                 self._conn.execute("ROLLBACK")
                 raise
+
+    # ------------------------------------------------------- setting overrides
+    def get_override(self, key: str) -> str | None:
+        """Raw JSON value for a setting override, or None when unset."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM setting_overrides WHERE key = ?", (key,)
+            ).fetchone()
+            return row["value"] if row else None
+
+    def set_override(self, key: str, value_json: str) -> None:
+        with self._tx() as conn:
+            conn.execute(
+                """INSERT INTO setting_overrides (key, value, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                                   updated_at = excluded.updated_at""",
+                (key, value_json, self._now()),
+            )
+
+    def delete_override(self, key: str) -> bool:
+        with self._tx() as conn:
+            cur = conn.execute("DELETE FROM setting_overrides WHERE key = ?", (key,))
+            return cur.rowcount > 0
+
+    def list_overrides(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key, value, updated_at FROM setting_overrides ORDER BY key"
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------ posts
     def create_post(

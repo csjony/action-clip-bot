@@ -93,3 +93,188 @@ publishing:
 schedule:
   videos_per_week: 3
   days: [mon, wed, fri]
+
+# --- Free-credit caps (dashboard-editable; wins over providers.yaml) ---------------
+credits:
+  local: { kind: daily, cap: 1000000 }
+
+# --- Budget guard extras ------------------------------------------------------
+budget_warning_pct: 80  # pre-flight Telegram warning when spend exceeds this % of cap
+
+# --- Quick-run smoke test -----------------------------------------------------
+quickrun:
+  clips: 3              # number of clips in --quick-run mode
+  clip_sec: 5           # seconds per quick-run clip
+
+# --- Pipeline assembly --------------------------------------------------------
+pipeline:
+  output_fps: 24            # final rendered fps (generation fps is video.generation.fps)
+  fallback_sample_rate: 44100  # silent-audio fallback sample rate (Hz)
+  caption_chunk_sec: 5.0    # fallback caption block length when Whisper is off
+
+# --- Generator client (local GPU server polling) -------------------------------
+generator_client:
+  ready_wait_sec: 2400      # max wait for /ready cold-start (model download)
+  ready_poll_sec: 15        # /ready poll cadence
+  ready_timeout_sec: 10     # /ready HTTP timeout
+  submit_timeout_sec: 30    # POST /generate timeout
+  job_wait_sec: 3600        # max wait for one job to finish
+  job_poll_sec: 3           # /status poll cadence
+  status_timeout_sec: 15    # /status HTTP timeout
+  result_timeout_sec: 120   # /result download timeout
+  breaker_502_count: 20     # consecutive 502s before failing fast (crashed server)
+  prompt_enhancers:         # auto-appended photorealism anchors (empty list disables)
+    - photorealistic
+    - live-action feature film
+    - shot on 35mm
+    - organic textures
+    - raw photograph
+
+# --- RunPod lifecycle ----------------------------------------------------------
+runpod:
+  base_url: "https://rest.runpod.io/v1"
+  proxy_port: 8000          # gpu_server port; proxy URL is https://{pod}-8000.proxy.runpod.net
+  api_timeout_sec: 15       # GET pod info
+  action_timeout_sec: 30    # POST start/stop
+  running_wait_sec: 300     # max wait for RUNNING state
+  running_poll_sec: 10      # RUNNING poll cadence
+  ip_wait_sec: 60           # max wait for public IP / port mapping
+  ip_poll_sec: 3
+  ssh_wait_sec: 60          # max wait for SSH daemon
+  ssh_connect_timeout_sec: 5
+  ssh_retry_sec: 2
+  upload_timeout_sec: 30
+  ssh_connect_timeout: 10   # ssh -o ConnectTimeout for bootstrap commands
+  bootstrap_timeout_sec: 30
+  restart_age_sec: 60       # freshly-uploaded gpu_server.py forces restart within this window
+  restart_settle_sec: 2     # sleep after pkill before relaunch
+  remote_path: "/workspace/gpu_server.py"
+  default_model: "Wan-AI/Wan2.2-T2V-A14B-Diffusers"  # WAN_MODEL_ID env wins
+
+# --- Editor (FFmpeg) ------------------------------------------------------------
+editor:
+  norm_width: 1280          # clip normalisation size before stitching
+  norm_height: 720
+  crf: 18                   # x264 quality (lower = better/bigger)
+  preset: "medium"          # x264 speed/quality tradeoff
+  audio_bitrate: "192k"     # mix + render audio bitrate
+  silent_bitrate: "128k"    # silent-fallback track bitrate
+  silent_rate: 44100        # silent-fallback sample rate (Hz)
+  sfx_volume: 0.5           # per-scene SFX track level
+  sfx_solo_volume: 0.6      # SFX level when it is the only background
+  sfx_solo_no_voice: 0.85   # SFX-only level when narration is off
+  music_volume: 0.55        # BGM under narration
+  music_solo: 0.85          # BGM-only level when narration is off
+  music_sfx_mix: 0.75       # BGM level in the music+SFX pre-mix without narration
+  duck_threshold: 0.05      # sidechain compressor threshold
+  duck_ratio: 4
+  duck_attack: 5
+  duck_release: 150
+  duck_dropout: 2
+  fade_out_sec: 2           # music-only end fade
+  hq_bitrate: "8M"          # final bitrate when max(w,h) >= 1920
+  hq_maxrate: "12M"
+  hq_bufsize: "24M"
+  sq_bitrate: "5M"          # smaller variants
+  sq_maxrate: "7M"
+  sq_bufsize: "14M"
+  loudnorm_tp: -1.5         # true-peak ceiling (dBTP)
+  loudnorm_lra: 11          # loudness range (LU)
+  outro_text: "FOLLOW FOR DAILY ACTION"
+  outro_width: 1080
+  outro_height: 1920
+  outro_fontsize: 72
+  outro_font: "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+# --- Voiceover (Edge-TTS) --------------------------------------------------------
+tts:
+  voice: "en-US-ChristopherNeural"
+  alt_voice: "en-US-GuyNeural"
+  rate: "+4%"
+  pitch: "+2Hz"
+
+# --- Captions (faster-whisper) -----------------------------------------------------
+whisper:
+  model: "base"             # tiny | base | small | medium (WHISPER_MODEL env wins)
+  device: "cpu"
+  compute_type: "int8"
+  vad_filter: true
+  word_timestamps: false
+
+# --- Music (Jamendo) ---------------------------------------------------------------
+music:
+  connect_timeout_sec: 10
+  read_timeout_sec: 15
+  write_timeout_sec: 10
+  pool_timeout_sec: 10
+  legacy_timeout_sec: 15    # plain-urlopen fallback path
+  page_size: 15             # tracks per search
+  min_bytes: 50000          # reject downloads smaller than this
+  retries: 3
+  backoff_base_sec: 2       # sleep(2**attempt)
+  chunk_bytes: 65536
+  duration_slack_sec: 10    # accept tracks within duration ± slack
+  min_duration_sec: 30      # never pick tracks shorter than this
+  min_synth_sec: 120        # synthetic-fallback track floor
+
+# --- SFX APIs -------------------------------------------------------------------------
+sfx_api:
+  elevenlabs_url: "https://api.elevenlabs.io/v1/sound-effects"
+  freesound_url: "https://freesound.org/apiv2/search/text/"
+  prompt_influence: 0.3     # ElevenLabs adherence to the text prompt
+  page_size: 1              # Freesound candidates per query
+  connect_timeout_sec: 10
+  elevenlabs_read_sec: 30
+  freesound_search_sec: 15
+  preview_timeout_sec: 10
+  replicate_timeout_sec: 30
+  chunk_bytes: 65536
+  replicate_version: "62871fb59889b2d7c13777f08deb3b36bdff88f7e1d53a50ad7694548a41b484"  # pinned MMAudio V2A
+  replicate_wait_sec: 90    # max wait for Replicate prediction
+  replicate_poll_sec: 2
+  mp3_quality: 2            # ffmpeg -q:a for MMAudio conversion (0=best)
+
+# --- LLM tuning --------------------------------------------------------------------------
+llm_tuning:
+  temperature: 0.9
+  rate_limit_cycles: 3      # full passes over all keys before offline fallback
+  rate_limit_wait_sec: 65   # wait for quota window rollover between cycles
+  words_per_sec: 2.5        # narration word budget per second of video
+  scene_duration_sec: 6     # offline-fallback scene length
+
+# --- Telegram notifications --------------------------------------------------------------------
+notify:
+  api_url: "https://api.telegram.org/bot{token}/sendMessage"
+  timeout_sec: 15
+  parse_mode: "Markdown"
+  preview_disabled: true
+
+# --- Dashboard UI -----------------------------------------------------------------------------------
+dashboard:
+  index_runs: 5             # recent runs shown on the overview
+  history_limit: 50         # default /runs and /posts page size
+  history_max: 200          # max page size (?limit=)
+  activity_days: 14         # overview activity strip window
+  activity_runs: 500        # runs scanned for the activity strip
+  script_json_max: 200000   # max pasted script size (chars)
+  api_key_max: 4000         # max credential length
+  label_max: 64
+  email_max: 254
+  priority_default: 100
+  priority_min: 0
+  priority_max: 9999
+  run_id_max: 64
+  log_default: 500          # default log tail (lines)
+  log_min: 50
+  log_max: 2000
+  log_fetch_timeout_sec: 5  # RunPod API timeout for the GPU log viewer
+  log_ssh_timeout_sec: 5    # SSH connect timeout for the GPU log viewer
+  log_ssh_cmd_sec: 10       # SSH command timeout for the GPU log viewer
+  event_poll_sec: 2         # run-detail live poll cadence
+  event_backoff_max_sec: 15
+  logs_poll_ms: 1500        # logs page refresh cadence
+  status_poll_sec: 10       # topbar status pill cadence
+  status_max_fails: 3       # stop polling after N failures
+  toast_ms: 3500
+  runner_history: 20        # in-memory recent runs kept
+
