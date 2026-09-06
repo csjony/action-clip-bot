@@ -1,6 +1,6 @@
 [project]
 name = "action-clip-bot"
-version = "0.1.0"
+version = "1.0.0"
 description = "AI action clip generator + multi-platform auto-publisher (budget bootstrap path)"
 readme = "README.md"
 requires-python = ">=3.11"
