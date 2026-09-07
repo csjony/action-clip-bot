@@ -359,9 +359,10 @@ async def index(request: Request):
             for d in days
         ]
         activity_max = max([a["count"] for a in activity] + [1])
+        activity_total = sum(a["count"] for a in activity)
     except Exception:
         log.exception("failed to build activity overview")
-        activity, activity_max = [], 1
+        activity, activity_max, activity_total = [], 1, 0
 
     return templates.TemplateResponse(request, "index.html", {
         **_base_context(request, "dashboard"),
@@ -374,6 +375,7 @@ async def index(request: Request):
         "total_posts": total_posts,
         "activity": activity,
         "activity_max": activity_max,
+        "activity_total": activity_total,
     })
 
 

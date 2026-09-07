@@ -13,20 +13,23 @@
 </div>
 
 <div class="card" style="margin-bottom: 16px;">
-  <h3>Run activity — last 14 days</h3>
-  {% if activity %}
-  <div class="activity-bars" role="img" aria-label="Runs per day for the last 14 days">
+  <div class="kpi-row" style="justify-content: space-between; align-items: center;">
+    <h3 style="margin: 0;">Run activity — last {{ activity | length }} days</h3>
+    {% if activity_total %}<span class="badge badge-dry">{{ activity_total }} runs</span>{% endif %}
+  </div>
+  {% if activity and activity_total %}
+  <div class="activity-bars" role="img" aria-label="Runs per day">
     {% for a in activity %}
     <div class="activity-bar" title="{{ a.label }}: {{ a.count }} run(s)">
       <div class="activity-track">
-        <div class="activity-fill" style="height: {{ (a.count / activity_max * 100) | round(0) }}%;"></div>
+        <div class="activity-fill {% if a.count == activity_max and a.count > 0 %}activity-peak{% endif %}" style="height: {{ (a.count / activity_max * 100) | round(0) }}%;"></div>
       </div>
       <span class="activity-label">{{ a.label }}</span>
     </div>
     {% endfor %}
   </div>
   {% else %}
-  <p class="muted">No runs in the last 14 days.</p>
+  <p class="muted" style="margin-top: 0.5rem;">No runs in this period yet — launch one to see activity here.</p>
   {% endif %}
 </div>
 
@@ -34,32 +37,41 @@
   <!-- Budget card -->
   <div class="card">
     <h3>Monthly budget</h3>
+    <div class="kpi-row">
+      <span class="kpi">${{ "%.2f"|format(spend) }}</span>
+      <span class="kpi-sub">of ${{ "%.2f"|format(cap) }} cap</span>
+      <span class="badge {% if spend_pct > 80 %}badge-fail{% elif spend_pct > 50 %}badge-warn{% else %}badge-ok{% endif %}">{{ "%.0f"|format(spend_pct) }}%</span>
+    </div>
     <div class="meter">
       <div class="meter-fill" style="width:{{ spend_pct }}%; background:{% if spend_pct > 80 %}var(--danger){% elif spend_pct > 50 %}var(--warn){% else %}var(--success){% endif %}"></div>
     </div>
-    <p style="font-weight: 600; font-size: 1.1rem; margin-top: 0.5rem;">
-      ${{ "%.2f"|format(spend) }} <span style="font-weight:400; color:var(--text-muted);">/ ${{ "%.2f"|format(cap) }}</span>
-    </p>
   </div>
 
   <!-- Posts card -->
   <div class="card">
     <h3>Videos generated</h3>
-    <p style="font-size: 1.25rem; font-weight: 700; margin-bottom: 0.25rem;">
-      {{ week_count }} <span style="font-weight:400; font-size: 0.9rem; color:var(--text-muted);">this week</span>
-    </p>
-    <p class="muted">{{ total_posts }} total videos assembled</p>
+    <div class="kpi-row">
+      <span class="kpi">{{ week_count }}</span>
+      <span class="kpi-sub">this week</span>
+    </div>
+    <p class="kpi-sub" style="margin-top: 0.5rem;">{{ total_posts }} total videos assembled</p>
   </div>
 
   <!-- Current run -->
   <div class="card">
     <h3>Pipeline status</h3>
     {% if current_run %}
-      <p style="margin-bottom: 0.75rem;">Run in progress: <code>{{ current_run[:12] }}…</code></p>
-      <a href="/runs/{{ current_run }}" class="btn btn-sm btn-primary">View Live Status →</a>
+      <div class="kpi-row">
+        <span class="badge badge-running">Running</span>
+        <code>{{ current_run[:12] }}…</code>
+      </div>
+      <p style="margin: 0.6rem 0 0.75rem;"><a href="/runs/{{ current_run }}" class="btn btn-sm btn-primary">View live status →</a></p>
     {% else %}
-      <p class="muted" style="margin-bottom: 0.75rem;">Idle — no run in progress</p>
-      <a href="/generate" class="btn btn-sm btn-secondary">New Generation Run →</a>
+      <div class="kpi-row">
+        <span class="badge badge-ok">Idle</span>
+        <span class="kpi-sub">no run in progress</span>
+      </div>
+      <p style="margin: 0.6rem 0 0;"><a href="/generate" class="btn btn-sm btn-secondary">New generation run →</a></p>
     {% endif %}
   </div>
 </div>
