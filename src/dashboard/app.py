@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -530,51 +531,51 @@ async def posts_page(request: Request,
     })
 
 
-def _theme_prompts() -> tuple[list, dict]:
-    """Render copy-paste LLM prompts for every theme (shared by GET + errors)."""
+def _llm_status() -> tuple[dict, bool]:
+    """Configured LLM keys per provider + whether any scriptwriter path works."""
+    status: dict = {}
+    for prov, env_key in (("gemini", "GEMINI_API_KEY"), ("groq", "GROQ_API_KEY")):
+        try:
+            keys = sum(1 for a in acct_store.list_all(prov) if a.get("enabled"))
+        except Exception:
+            keys = 0
+        env = bool(os.environ.get(env_key))
+        status[prov] = {"keys": keys, "env": env}
+    ready = any(v["keys"] or v["env"] for v in status.values())
+    return status, ready
+
+
+def _generate_error(request: Request, error: str, theme: str):
     settings = get_settings()
     themes = settings.llm.get("themes", [])
-    from src.content.scriptwriter import Scriptwriter
-    sw = Scriptwriter(settings)
-    video_cfg = settings.video
-    target_duration = video_cfg.get("target_duration_sec", 70)
-    scene_count = video_cfg.get("max_clips", 12)
-    prompts: dict[str, str] = {}
-    for t in themes:
-        try:
-            prompts[t] = sw._render_prompt(t, scene_count, target_duration)
-        except Exception as exc:
-            prompts[t] = f"Error rendering prompt for theme {t}: {exc}"
-    return themes, prompts
-
-
-def _generate_error(request: Request, error: str, script_json: str):
-    themes, prompts = _theme_prompts()
+    llm_status, llm_ready = _llm_status()
     return templates.TemplateResponse(request, "generate.html", {
         **_base_context(request, "generate"),
         "themes": themes,
-        "prompts": prompts,
+        "selected_theme": theme,
+        "llm_status": llm_status,
+        "llm_ready": llm_ready,
         "is_busy": runner.is_busy,
         "current_run_id": runner.current_run_id,
         "error": error,
-        "script_json": script_json,
-        "script_json_max": int(_dash_cfg().get("script_json_max", 200000)),
     })
 
 
 # --- Generate ---
 @app.get("/generate", response_class=HTMLResponse)
 async def generate_page(request: Request):
-    themes, prompts = _theme_prompts()
+    settings = get_settings()
+    themes = settings.llm.get("themes", [])
+    llm_status, llm_ready = _llm_status()
     return templates.TemplateResponse(request, "generate.html", {
         **_base_context(request, "generate"),
         "themes": themes,
-        "prompts": prompts,
+        "selected_theme": themes[0] if themes else "",
+        "llm_status": llm_status,
+        "llm_ready": llm_ready,
         "is_busy": runner.is_busy,
         "current_run_id": runner.current_run_id,
         "error": None,
-        "script_json": "",
-        "script_json_max": int(_dash_cfg().get("script_json_max", 200000)),
     })
 
 
@@ -582,45 +583,24 @@ async def generate_page(request: Request):
 async def generate_submit(
     request: Request,
     theme: str = Form(default=""),
-    dry_run: bool = Form(default=False),
     quick_test: bool = Form(default=False),
-    script_json: str = Form(default=""),
 ):
     if runner.is_busy:
         return RedirectResponse(
             url=f"/runs/{runner.current_run_id}" if runner.current_run_id else "/generate",
             status_code=303,
         )
-    
-    script_json_clean = script_json.strip() or None
-    if not script_json_clean:
-        return _generate_error(request, "Manual Script JSON is required to start a run.", "")
 
-    json_max = int(_dash_cfg().get("script_json_max", 200000))
-    if len(script_json_clean) > json_max:
-        return _generate_error(request, f"Script JSON is too large (max {json_max} chars).", script_json)
-
-    # Quick validation
-    try:
-        import json
-        text = script_json_clean
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
-        parsed = json.loads(text)
-        if not isinstance(parsed, dict) or "scenes" not in parsed:
-            return _generate_error(request, "Script JSON must be an object with a 'scenes' list.", script_json)
-        script_json_clean = text # save normalized json
-    except Exception as exc:
-        return _generate_error(request, f"Invalid JSON: {exc}", script_json)
+    theme = (theme or "").strip()
+    themes = get_settings().llm.get("themes", [])
+    if not theme or (themes and theme not in themes):
+        return _generate_error(request, "Please choose a valid theme.", theme)
 
     state = runner.submit(
-        dry_run=dry_run,
-        theme=theme or None,
+        dry_run=False,
+        theme=theme,
         quick_test=quick_test,
-        script_json=script_json_clean
+        script_json=None,
     )
     return RedirectResponse(url=f"/runs/{state.run_id}", status_code=303)
 
@@ -677,56 +657,106 @@ async def api_logs(source: str = "dashboard", limit: int = 500):
         if not log_file.exists():
             return {"content": "No dashboard log file found yet."}
         try:
-            # Read last N lines
-            with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
-                lines = f.readlines()
-                return {"content": "".join(lines[-limit:])}
+            return {"content": _tail_file(log_file, limit)}
         except Exception as e:
             return {"content": f"Error reading dashboard log: {e}"}
-            
+
     elif source == "gpu":
-        runpod_key = os.environ.get("RUNPOD_API_KEY")
-        runpod_id = os.environ.get("RUNPOD_POD_ID")
-        if not runpod_key or not runpod_id:
-            return {"content": "RunPod configuration (RUNPOD_API_KEY / RUNPOD_POD_ID) is missing in .env."}
-        
-        try:
-            import httpx
-            headers = {"Authorization": f"Bearer {runpod_key}"}
-            r = httpx.get(f"https://rest.runpod.io/v1/pods/{runpod_id}", headers=headers,
-                          timeout=float(cfg.get("log_fetch_timeout_sec", 5.0)))
-            if r.status_code != 200:
-                return {"content": f"Failed to fetch pod details from RunPod (status {r.status_code})."}
-            pod_info = r.json()
-            if pod_info.get("desiredStatus") != "RUNNING":
-                return {"content": f"GPU pod status is {pod_info.get('desiredStatus', 'UNKNOWN')} (not running)."}
-            
-            public_ip = pod_info.get("publicIp")
-            ports = pod_info.get("portMappings", {})
-            ssh_port = ports.get("22/tcp") or ports.get("22")
-            if not public_ip or not ssh_port:
-                return {"content": "GPU pod is starting but SSH port/IP is not assigned yet."}
-            
-            # Execute SSH tail command
-            import subprocess
-            cmd = [
-                "ssh",
-                "-o", "StrictHostKeyChecking=no",
-                "-o", f"ConnectTimeout={cfg.get('log_ssh_timeout_sec', 5)}",
-                "-p", str(ssh_port),
-                f"root@{public_ip}",
-                f"tail -n {limit} /workspace/gpu_server.log 2>/dev/null || echo 'No gpu_server.log file found on remote volume.'"
-            ]
-            res = subprocess.run(cmd, capture_output=True, text=True,
-                                 timeout=int(cfg.get("log_ssh_cmd_sec", 10)))
-            if res.returncode != 0:
-                return {"content": f"Failed to connect to GPU Pod via SSH (exit code {res.returncode}):\n{res.stderr}"}
-            return {"content": res.stdout}
-        except Exception as e:
-            return {"content": f"Error querying remote GPU server logs: {e}"}
-            
+        # Cached: the GPU fetch does RunPod HTTPS + SSH (up to ~15s when the
+        # pod is dead). Without caching, the 1.5s auto-refresh piles up
+        # blocked threads until the whole dashboard hangs.
+        return _cached_gpu_logs(limit, cfg)
+
     else:
         return {"content": "Invalid log source specified."}
+
+
+def _tail_file(path: Path, max_lines: int, chunk_bytes: int = 65536) -> str:
+    """Read the last *max_lines* of a file without loading it whole.
+
+    Seeks from the end in binary chunks, so a multi-MB dashboard.log costs
+    milliseconds instead of a full read + split on every 1.5s poll.
+    """
+    with open(path, "rb") as fh:
+        fh.seek(0, 2)
+        size = fh.tell()
+        data = b""
+        lines: list[bytes] = []
+        while size > 0 and len(lines) <= max_lines:
+            step = min(chunk_bytes, size)
+            size -= step
+            fh.seek(size)
+            data = fh.read(step) + data
+            lines = data.split(b"\n")
+        tail = lines[-max_lines:] if len(lines) > max_lines else lines
+    return b"\n".join(tail).decode("utf-8", errors="ignore")[-200_000:]
+
+
+_gpu_log_cache: dict = {"at": 0.0, "limit": 0, "content": ""}
+_gpu_log_lock = threading.Lock()
+
+
+def _cached_gpu_logs(limit: int, cfg: dict) -> dict:
+    """TTL-cached GPU log fetch with singleflight.
+
+    Concurrent polls share one in-flight fetch and reuse the result for
+    `gpu_log_ttl_sec` (default 10s), so a dead pod can never pile up
+    blocked threads faster than the cache expires.
+    """
+    import time as _time
+
+    ttl = float(cfg.get("gpu_log_ttl_sec", 10))
+    now = _time.monotonic()
+    with _gpu_log_lock:
+        if now - _gpu_log_cache["at"] < ttl and _gpu_log_cache["limit"] >= limit:
+            return {"content": _gpu_log_cache["content"], "cached": True}
+        # Singleflight: hold the lock for the whole fetch so concurrent
+        # polls wait on one fetch instead of each starting their own.
+        content = _fetch_gpu_logs(limit, cfg)["content"]
+        _gpu_log_cache.update(at=_time.monotonic(), limit=limit, content=content)
+        return {"content": content, "cached": False}
+
+
+def _fetch_gpu_logs(limit: int, cfg: dict) -> dict:
+    runpod_key = os.environ.get("RUNPOD_API_KEY")
+    runpod_id = os.environ.get("RUNPOD_POD_ID")
+    if not runpod_key or not runpod_id:
+        return {"content": "RunPod configuration (RUNPOD_API_KEY / RUNPOD_POD_ID) is missing in .env."}
+
+    try:
+        import httpx
+        headers = {"Authorization": f"Bearer {runpod_key}"}
+        r = httpx.get(f"https://rest.runpod.io/v1/pods/{runpod_id}", headers=headers,
+                      timeout=float(cfg.get("log_fetch_timeout_sec", 5.0)))
+        if r.status_code != 200:
+            return {"content": f"Failed to fetch pod details from RunPod (status {r.status_code})."}
+        pod_info = r.json()
+        if pod_info.get("desiredStatus") != "RUNNING":
+            return {"content": f"GPU pod status is {pod_info.get('desiredStatus', 'UNKNOWN')} (not running)."}
+
+        public_ip = pod_info.get("publicIp")
+        ports = pod_info.get("portMappings", {})
+        ssh_port = ports.get("22/tcp") or ports.get("22")
+        if not public_ip or not ssh_port:
+            return {"content": "GPU pod is starting but SSH port/IP is not assigned yet."}
+
+        # Execute SSH tail command
+        import subprocess
+        cmd = [
+            "ssh",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", f"ConnectTimeout={cfg.get('log_ssh_timeout_sec', 5)}",
+            "-p", str(ssh_port),
+            f"root@{public_ip}",
+            f"tail -n {limit} /workspace/gpu_server.log 2>/dev/null || echo 'No gpu_server.log file found on remote volume.'"
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True,
+                             timeout=int(cfg.get("log_ssh_cmd_sec", 10)))
+        if res.returncode != 0:
+            return {"content": f"Failed to connect to GPU Pod via SSH (exit code {res.returncode}):\n{res.stderr}"}
+        return {"content": res.stdout}
+    except Exception as e:
+        return {"content": f"Error querying remote GPU server logs: {e}"}
 
 
 # ---------------------------------------------------------------------------

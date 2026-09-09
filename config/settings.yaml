@@ -270,6 +270,7 @@ dashboard:
   log_fetch_timeout_sec: 5  # RunPod API timeout for the GPU log viewer
   log_ssh_timeout_sec: 5    # SSH connect timeout for the GPU log viewer
   log_ssh_cmd_sec: 10       # SSH command timeout for the GPU log viewer
+  gpu_log_ttl_sec: 10       # GPU log cache lifetime (stops hung-pod poll pileups)
   event_poll_sec: 2         # run-detail live poll cadence
   event_backoff_max_sec: 15
   logs_poll_ms: 1500        # logs page refresh cadence

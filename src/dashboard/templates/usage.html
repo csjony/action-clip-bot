@@ -11,19 +11,20 @@
 
 <div class="cards">
   <div class="card" style="grid-column: span 2;">
-    <h3>💰 Monthly Paid Spend</h3>
+    <h3>Monthly paid spend</h3>
     {% set spend_pct = (monthly_spend / budget_cap * 100) if budget_cap > 0 else 0 %}
+    <div class="kpi-row">
+      <span class="kpi">${{ "%.2f"|format(monthly_spend) }}</span>
+      <span class="kpi-sub">of ${{ "%.2f"|format(budget_cap) }} cap</span>
+      <span class="badge {% if spend_pct > 80 %}badge-fail{% else %}badge-ok{% endif %}">{{ "%.1f"|format(spend_pct) }}% limit</span>
+    </div>
     <div class="meter">
       <div class="meter-fill" style="width:{% if spend_pct > 100 %}100{% else %}{{ "%.0f"|format(spend_pct) }}{% endif %}%; background:{% if spend_pct > 80 %}var(--danger){% elif spend_pct > 50 %}var(--warn){% else %}var(--success){% endif %}"></div>
-    </div>
-    <div style="display:flex; justify-content:space-between; align-items:center;">
-      <span style="font-weight:700; font-size:1.1rem;">${{ "%.2f"|format(monthly_spend) }} <span style="font-weight:400; color:var(--text-muted);">/ ${{ "%.2f"|format(budget_cap) }}</span></span>
-      <span class="badge {% if spend_pct > 80 %}badge-fail{% else %}badge-ok{% endif %}">{{ "%.1f"|format(spend_pct) }}% limit</span>
     </div>
   </div>
 </div>
 
-<h2>Free-Tier Credits (This Period)</h2>
+<h2>Free-tier credits (this period)</h2>
 <div class="table-container">
   <table>
     <thead>
@@ -48,7 +49,7 @@
   </table>
 </div>
 
-<h2>Account API Usage Inspector</h2>
+<h2>Account API usage</h2>
 
 <!-- Controls row -->
 <div class="usage-controls">

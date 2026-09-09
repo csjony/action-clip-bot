@@ -198,6 +198,10 @@ th, td {
   font-size: 0.875rem;
   font-variant-numeric: tabular-nums;
 }
+/* Content-sized columns: dates, badges and actions never stretch */
+th:first-child, td:first-child { white-space: nowrap; }
+th:last-child, td:last-child { width: 1%; white-space: nowrap; }
+td .badge { white-space: nowrap; }
 th {
   color: var(--text-muted);
   font-weight: 500;
@@ -698,8 +702,9 @@ footer {
   font-family: var(--font-title);
   font-weight: 500;
   font-size: 1rem;
+  letter-spacing: -0.01em;
   text-decoration: none;
-  color: var(--text-muted);
+  color: var(--text);
   display: flex;
   align-items: center;
   gap: 0.6rem;
@@ -814,6 +819,13 @@ footer {
 .crumb-section { color: var(--text-muted); }
 .crumb-sep { color: var(--text-muted); opacity: 0.5; }
 .crumb-page { color: var(--text); font-weight: 500; }
+/* LLM key status row on the Generate page */
+.llm-status {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
 .topbar-right {
   margin-left: auto;
   display: flex;
