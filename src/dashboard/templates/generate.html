@@ -4,23 +4,23 @@
 {% block content %}
 <div class="page-head">
   <div>
-    <h1>Generate Video</h1>
-    <p class="muted page-sub">Turn a script JSON into clips, music and a finished video.</p>
+    <h1>Generate video</h1>
+    <p class="muted page-sub">Pick a theme — the script is written automatically by your configured LLM keys.</p>
   </div>
 </div>
 <div class="steps" aria-label="Progress">
-  <span class="step"><span class="step-n">1</span> Get prompt</span>
+  <span class="step"><span class="step-n">1</span> Pick theme</span>
   <span class="step-arrow" aria-hidden="true">→</span>
-  <span class="step"><span class="step-n">2</span> Paste script JSON</span>
+  <span class="step"><span class="step-n">2</span> LLM writes script</span>
   <span class="step-arrow" aria-hidden="true">→</span>
-  <span class="step"><span class="step-n">3</span> Launch</span>
+  <span class="step"><span class="step-n">3</span> Render &amp; publish</span>
 </div>
 
 {% if is_busy %}
 <div class="card card-warn">
-  <h3>⚠️ Execution Run Active</h3>
+  <h3>Execution run active</h3>
   <p style="margin-bottom: 1rem;">The pipeline is currently processing another video. Please wait for it to complete or monitor progress.</p>
-  <a href="/runs/{{ current_run_id }}" class="btn btn-primary">View Active Run Status →</a>
+  <a href="/runs/{{ current_run_id }}" class="btn btn-primary">View active run →</a>
 </div>
 {% else %}
 <div class="card">
@@ -28,58 +28,39 @@
 
   {% if error %}
   <div class="alert alert-error" role="alert">
-    <strong>⚠️ Error:</strong> {{ error }}
+    <strong>Error:</strong> {{ error }}
   </div>
   {% endif %}
 
-  <!-- STEP 1: Prompt Retrieval -->
-  <section class="step-box" aria-labelledby="step1-title">
-    <h4 id="step1-title" style="margin-top: 0; margin-bottom: 0.5rem; color: var(--primary);">Step 1: Choose Theme &amp; Get Prompt</h4>
-    <p class="muted" style="font-size: 0.85rem; margin-bottom: 1rem;">Select a theme, copy the prompt, and paste it into ChatGPT, Gemini, or Claude to get your script JSON.</p>
+  <div class="llm-status" aria-label="Scriptwriter status">
+    {% for prov, st in llm_status.items() %}
+    <span class="badge {% if st['keys'] or st['env'] %}badge-ok{% else %}badge-warn{% endif %}" title="{% if st['keys'] or st['env'] %}Ready{% else %}No key — offline template will be used{% endif %}">
+      {{ prov }}: {% if st['keys'] %}{{ st['keys'] }} key(s){% elif st['env'] %}env key{% else %}no key{% endif %}
+    </span>
+    {% endfor %}
+  </div>
+  {% if not llm_ready %}
+  <p class="field-hint" style="margin-bottom: 1rem;">No LLM keys found — runs will use the built-in offline script template. Add a Gemini/Groq key on the <a href="/accounts">Accounts</a> page for AI-written scripts.</p>
+  {% endif %}
 
+  <form method="post" id="generate-form">
     <div class="form-row">
-      <label for="theme_selector">Select Script Theme
-        <select id="theme_selector">
+      <label for="theme_selector">Script theme
+        <select id="theme_selector" name="theme" required>
           {% for t in themes %}
-          <option value="{{ t }}">{{ t | replace('_', ' ') | title }}</option>
+          <option value="{{ t }}" {% if t == selected_theme %}selected{% endif %}>{{ t | replace('_', ' ') | title }}</option>
           {% endfor %}
         </select>
+        <span class="field-hint">The LLM writes scenes, narration, captions and hashtags for this theme.</span>
       </label>
     </div>
 
-    <div class="form-row">
-      <label for="instructions_box">Instructions Prompt (copy to ChatGPT / Gemini / Claude)
-        <span class="field-hint">Read-only — generated from the selected theme.</span>
-        <span style="position: relative; display: block; margin-top: 0.5rem;">
-          <textarea id="instructions_box" readonly rows="10" class="mono-area"></textarea>
-          <button id="copy_prompt_btn" type="button" class="btn btn-sm" style="position: absolute; right: 10px; top: 10px;">Copy Prompt</button>
-        </span>
-      </label>
-    </div>
-  </section>
-
-  <!-- STEP 2: Paste JSON and submit -->
-  <form method="post" id="generate-form" novalidate>
-    <input type="hidden" name="theme" id="hidden_theme" value="{{ themes[0] if themes else '' }}">
-
-    <section class="step-box" aria-labelledby="step2-title">
-      <h4 id="step2-title" style="margin-top: 0; margin-bottom: 0.5rem; color: var(--success);">Step 2: Paste Generated Script JSON <span class="required-mark" aria-hidden="true">*</span></h4>
-      <p class="muted" style="font-size: 0.85rem; margin-bottom: 1rem;">Paste the raw JSON block returned by the LLM.</p>
-
-      <div class="form-row">
-        <label for="script_json_box">Script JSON
-          <textarea id="script_json_box" name="script_json" rows="12" required maxlength="{{ script_json_max | default(200000) }}" placeholder='Paste your ChatGPT/Gemini/Claude output JSON here...' class="mono-area">{{ script_json or "" }}</textarea>
-          <span class="field-hint"><span id="json_status" aria-live="polite">Waiting for input…</span> · <span id="json_count">0</span> chars</span>
-        </label>
-      </div>
-    </section>
-
-    <div class="form-row" style="margin-top: 1.5rem; padding: 1rem; background: rgba(99,102,241,0.08); border-radius: 8px; border: 1px solid rgba(99,102,241,0.25);">
+    <div class="form-row" style="margin-top: 1rem; padding: 1rem; background: #f6fafe; border-radius: 8px; border: 1px solid var(--border);">
       <label style="flex-direction: row; align-items: flex-start; gap: 0.75rem; cursor: pointer;" for="quick_test">
         <input type="checkbox" name="quick_test" id="quick_test" style="width: auto; margin: 0.2rem 0 0 0; flex-shrink: 0;">
         <span>
-          <strong>Quick test mode</strong> — GPU VPS smoke-test<br>
-          <span class="muted" style="font-size: 0.85rem;">Generates <strong>3 clips × 5s</strong> each (~15s total output). Implies Dry Run. Use this to confirm your GPU VPS tunnel is working before launching a full run.</span>
+          <strong>Quick test mode</strong> — GPU smoke-test<br>
+          <span class="muted" style="font-size: 0.85rem;">Generates <strong>3 clips × 5s</strong> (~15s total). Skips publishing. Use this to confirm the GPU tunnel works before a full run.</span>
         </span>
       </label>
     </div>
@@ -92,67 +73,10 @@
 </div>
 
 <script>
-  const promptsMap = {{ prompts | tojson }};
-
-  const themeSelector = document.getElementById('theme_selector');
-  const instructionsBox = document.getElementById('instructions_box');
-  const copyBtn = document.getElementById('copy_prompt_btn');
-  const hiddenThemeInput = document.getElementById('hidden_theme');
-  const jsonBox = document.getElementById('script_json_box');
-  const jsonStatus = document.getElementById('json_status');
-  const jsonCount = document.getElementById('json_count');
-  const form = document.getElementById('generate-form');
-  const submitBtn = document.getElementById('generate-submit');
-
-  function updatePrompt() {
-    const selectedTheme = themeSelector.value;
-    instructionsBox.value = promptsMap[selectedTheme] || '';
-    hiddenThemeInput.value = selectedTheme;
-  }
-
-  themeSelector.addEventListener('change', updatePrompt);
-  updatePrompt();
-
-  copyBtn.addEventListener('click', async () => {
-    const ok = await copyText(instructionsBox.value, instructionsBox);
-    copyBtn.textContent = ok ? 'Copied!' : 'Copy failed — select manually';
-    toast(ok ? 'Prompt copied to clipboard.' : 'Copy failed. Select the text manually.', ok ? 'success' : 'error');
-    setTimeout(() => { copyBtn.textContent = 'Copy Prompt'; }, 2000);
-  });
-
-  function validateJson(live) {
-    const text = jsonBox.value.trim();
-    jsonCount.textContent = String(jsonBox.value.length);
-    if (!text) {
-      jsonStatus.textContent = 'Waiting for input…';
-      return false;
-    }
-    try {
-      const parsed = JSON.parse(text.replace(/^```[a-z]*\n?/i, '').replace(/```$/, '').trim());
-      if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.scenes)) {
-        jsonStatus.textContent = '⚠️ Valid JSON, but no "scenes" list found.';
-        return false;
-      }
-      jsonStatus.textContent = `✅ Valid JSON — ${parsed.scenes.length} scene(s).`;
-      return true;
-    } catch (e) {
-      jsonStatus.textContent = live ? `⚠️ Invalid JSON: ${e.message}` : 'Invalid JSON.';
-      return false;
-    }
-  }
-
-  jsonBox.addEventListener('input', () => validateJson(true));
-  validateJson(true);
-
-  form.addEventListener('submit', (e) => {
-    if (!validateJson(false)) {
-      e.preventDefault();
-      toast('Please paste valid script JSON with a "scenes" list.', 'error');
-      jsonBox.focus();
-      return;
-    }
-    submitBtn.disabled = true;
-    submitBtn.textContent = '⏳ Starting…';
+  document.getElementById('generate-form').addEventListener('submit', () => {
+    const btn = document.getElementById('generate-submit');
+    btn.disabled = true;
+    btn.textContent = 'Starting…';
   });
 </script>
 {% endif %}

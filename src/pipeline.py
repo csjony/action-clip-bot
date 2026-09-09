@@ -141,16 +141,20 @@ class Pipeline:
     # ----------------------------------------------------------------- steps
     def _plan_content(self):
         with self._phase(0, "scriptwriter"):
+            from src.dashboard.accounts import AccountStore
+            from src.content.scriptwriter import Scriptwriter
+            writer = Scriptwriter(
+                self.settings, self.store, AccountStore(self.store))
             if self.script_json_override:
                 log.info("Using manual script JSON override")
-                from src.content.scriptwriter import Scriptwriter
+                json_max = int(self.settings.get("dashboard.script_json_max", 200000))
+                if len(self.script_json_override) > json_max:
+                    raise ValueError(f"Manual script JSON exceeds {json_max} chars.")
                 plan = Scriptwriter._parse(self.script_json_override, self.theme_override or "manual")
             else:
-                raise ValueError(
-                    "Manual script JSON is required for all runs! "
-                    "Please generate the script via ChatGPT/Gemini/Claude "
-                    "using the prompts on the dashboard, and paste it into the JSON field."
-                )
+                theme = self.theme_override or writer.pick_theme()
+                log.info("Generating script via LLM for theme %r ...", theme)
+                plan = writer.write(theme=theme)
             
             if self.quick_test:
                 log.info("Quick test mode: trimming scenes to first %d clips", self.quick_clips)

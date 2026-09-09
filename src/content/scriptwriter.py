@@ -238,20 +238,63 @@ def _llm_tuning() -> dict:
 class Scriptwriter:
     """Picks a theme, renders the system prompt, parses LLM output into a plan."""
 
-    def __init__(self, settings: Settings | None = None, store: Store | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, store: Store | None = None,
+                 account_store=None) -> None:
         self.settings = settings or get_settings()
         self.store = store
+        self.account_store = account_store
         self._backends: list[LLMBackend] = self._build_backends()
 
     def _build_backends(self) -> list[LLMBackend]:
-        """Build the backends list. LLM API script generation has been removed
-        as per user requirements. Only OfflineBackend is retained as a local fallback.
+        """One backend per configured LLM key: dashboard accounts first,
+        env-var key as fallback — so free-tier keys rotate on rate limits.
+
+        When neither path yields a key, only OfflineBackend remains and
+        write() uses the local template (no API needed).
         """
+        from src.dashboard.accounts import AccountStore
+
         backends: list[LLMBackend] = []
+        providers = self.settings.llm.get("providers", ["gemini", "groq"]) or []
+        models = self.settings.llm.get("model", {}) or {}
+        env_keys = {"gemini": "GEMINI_API_KEY", "groq": "GROQ_API_KEY"}
+        acct_store = getattr(self, "account_store", None)
+        if acct_store is None and self.store is not None:
+            try:
+                acct_store = AccountStore(self.store)
+            except Exception:
+                acct_store = None
+
+        for provider in providers:
+            model = models.get(provider)
+            accounts = []
+            if acct_store is not None:
+                try:
+                    accounts = acct_store.resolve(provider)
+                except Exception as exc:
+                    log.warning("account resolve for %s failed: %s", provider, exc)
+            if not accounts:
+                env_key = self.settings.env(env_keys.get(provider, ""))
+                if env_key:
+                    from src.dashboard.accounts import Account
+                    accounts = [Account(id=None, provider=provider, label="env", api_key=env_key)]
+            for acct in accounts:
+                if provider == "gemini":
+                    backends.append(GeminiBackend(
+                        acct.api_key, model=model or "gemini-3.5-flash",
+                        account_id=acct.id, store=self.store))
+                elif provider == "groq":
+                    backends.append(GroqBackend(
+                        acct.api_key, model=model or "llama-3.1-8b-instant",
+                        account_id=acct.id, store=self.store))
+                else:
+                    log.warning("unknown LLM provider %r — skipping", provider)
         backends.append(OfflineBackend(scene_duration=int(_llm_tuning().get(
             "scene_duration_sec",
             self.settings.video.get("scene_duration_sec", 6)))))
-        log.debug("Scriptwriter backends (1): OfflineBackend (LLM generation disabled)")
+        log.debug("Scriptwriter backends (%d): %s + OfflineBackend",
+                  len(backends) - 1,
+                  [type(b).__name__ for b in backends[:-1]] or ["none"])
         return backends
 
     def pick_theme(self) -> str:
