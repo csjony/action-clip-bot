@@ -282,8 +282,12 @@ class GeneratorPool:
         Mirrors `_default_factory` but pulls the server URL from the
         Account object instead of `settings.env(...)`.
         """
+        from src.generators.colab import ColabGenerator
         from src.generators.local import LocalGenerator
 
+        if name == "colab":
+            # A "colab" dashboard account stores the tunnel URL as its key.
+            return ColabGenerator(tunnel_url=account.api_key)
         if name == "local":
             return LocalGenerator(server_url=account.api_key)
         raise ValueError(f"unknown provider in providers.yaml: {name!r}")
@@ -448,9 +452,19 @@ class GeneratorPool:
 
 
 def _default_factory(name: str, spec: dict, settings: Settings) -> VideoGenerator:
-    """Map a providers.yaml entry to a concrete generator instance (env-var path)."""
+    """Map a providers.yaml entry to a concrete generator instance (env-var path).
+
+    The global `gpu.backend` switch decides which GPU family materialises:
+    runpod → LocalGenerator, colab → ColabGenerator. The unselected family
+    always reports unconfigured so it drops out of the chain untouched.
+    """
+    from src.generators.colab import ColabGenerator, selected_backend
     from src.generators.local import LocalGenerator
 
+    if name == "colab":
+        return ColabGenerator()
     if name == "local":
+        if selected_backend() == "colab":
+            return LocalGenerator(server_url="")  # unconfigured → skipped
         return LocalGenerator(server_url=settings.env(spec.get("env_key", "")))
     raise ValueError(f"unknown provider in providers.yaml: {name!r}")

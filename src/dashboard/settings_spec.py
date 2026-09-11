@@ -25,6 +25,8 @@ SPEC: list[dict] = [
          "help": "Telegram pre-flight warning when spend passes this % of cap."},
         {"key": "credits.local.cap", "label": "Local daily clip cap", "type": "int", "default": 1000000, "min": 1,
          "help": "Free-credit ceiling for the local GPU provider."},
+        {"key": "credits.colab.cap", "label": "Colab daily clip cap", "type": "int", "default": 1000000, "min": 1,
+         "help": "Free-credit ceiling for the Colab provider."},
     ]},
     {"group": "Video plan", "desc": "Target shape of a full video.", "fields": [
         {"key": "video.target_duration_sec", "label": "Target duration (s)", "type": "int", "default": 70, "min": 5, "max": 600},
@@ -70,8 +72,7 @@ SPEC: list[dict] = [
          "default": ["photorealistic", "live-action feature film", "shot on 35mm", "organic textures", "raw photograph"],
          "help": "One per line. Auto-appended photorealism anchors; empty disables."},
     ]},
-    {"group": "RunPod", "desc": "Pod lifecycle automation.", "fields": [
-        {"key": "runpod.base_url", "label": "API base URL", "type": "text", "default": "https://rest.runpod.io/v1"},
+    {"group": "RunPod", "desc": "Pod lifecycle automation (used when the Default Gpu backend is runpod).", "fields": [        {"key": "runpod.base_url", "label": "API base URL", "type": "text", "default": "https://rest.runpod.io/v1"},
         {"key": "runpod.proxy_port", "label": "GPU server port", "type": "int", "default": 8000, "min": 1, "max": 65535},
         {"key": "runpod.default_model", "label": "Default model", "type": "text",
          "default": "Wan-AI/Wan2.2-T2V-A14B-Diffusers", "help": "WAN_MODEL_ID env var wins."},

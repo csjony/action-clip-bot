@@ -97,6 +97,7 @@ schedule:
 # --- Free-credit caps (dashboard-editable; wins over providers.yaml) ---------------
 credits:
   local: { kind: daily, cap: 1000000 }
+  colab: { kind: daily, cap: 1000000 }
 
 # --- Budget guard extras ------------------------------------------------------
 budget_warning_pct: 80  # pre-flight Telegram warning when spend exceeds this % of cap
@@ -111,6 +112,19 @@ pipeline:
   output_fps: 24            # final rendered fps (generation fps is video.generation.fps)
   fallback_sample_rate: 44100  # silent-audio fallback sample rate (Hz)
   caption_chunk_sec: 5.0    # fallback caption block length when Whisper is off
+
+# --- GPU backend ---------------------------------------------------------------
+# Which cloud GPU runs the video model. The pipeline follows the selection:
+#   runpod — fully automated: start pod → SSH bootstrap → proxy URL → stop pod.
+#   colab  — manual: run colab/ActionClipBot_Colab.ipynb, paste the Cloudflare
+#            tunnel URL below. No pod is started/stopped; frequent status
+#            polling keeps HTTP activity (and notebook output) flowing so the
+#            runtime stays awake during generation.
+gpu:
+  backend: "runpod"            # runpod | colab
+  colab_url: ""                # e.g. https://xyz.trycloudflare.com (COLAB_TUNNEL_URL env wins)
+  colab_poll_sec: 3            # /status cadence on colab = keep-alive heartbeat
+  colab_ready_wait_sec: 3600   # max wait for the colab server /ready (install time)
 
 # --- Generator client (local GPU server polling) -------------------------------
 generator_client:

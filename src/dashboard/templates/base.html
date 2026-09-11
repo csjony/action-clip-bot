@@ -27,6 +27,15 @@
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2l2.4 4.9 5.6.8-4 4 .9 5.6-4.9-2.6-4.9 2.6.9-5.6-4-4 5.6-.8z" fill="currentColor"/></svg>
         <span>Generate</span>
       </a>
+      <p class="side-heading">GPU</p>
+      <a href="/gpu" class="side-link {% if active_page == 'gpu' %}active{% endif %}" {% if active_page == 'gpu' %}aria-current="page"{% endif %}>
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12v9H4zm-2 0h1v9H2zm15 0h1v9h-1zM6 3h8v2H6zm-1 14h10v1H5z" fill="currentColor"/></svg>
+        <span>Default Gpu</span>
+      </a>
+      <a href="/colab-code" class="side-link {% if active_page == 'colab' %}active{% endif %}" {% if active_page == 'colab' %}aria-current="page"{% endif %}>
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4l-4 6 4 6V4zm8 0l4 6-4 6V4zM13 5l-2 10h-1.5L11.5 5z" fill="currentColor"/></svg>
+        <span>Colab Code</span>
+      </a>
       <p class="side-heading">Manage</p>
       <a href="/runs" class="side-link {% if active_page == 'runs' %}active{% endif %}" {% if active_page == 'runs' %}aria-current="page"{% endif %}>
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5h12v2H4zm0 4h12v2H4zm0 4h7v2H4z" fill="currentColor"/></svg>
@@ -66,7 +75,7 @@
     <header class="topbar">
       <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="sidebar" aria-label="Open navigation">☰</button>
       <nav class="crumbs" aria-label="Breadcrumb">
-        <span class="crumb-section">{% if active_page in ['dashboard', 'generate'] %}Create{% elif active_page in ['runs', 'posts'] %}Manage{% elif active_page in ['accounts', 'usage', 'logs', 'settings'] %}Configure{% else %}Action Clip Bot{% endif %}</span>
+        <span class="crumb-section">{% if active_page in ['dashboard', 'generate'] %}Create{% elif active_page in ['gpu', 'colab'] %}GPU{% elif active_page in ['runs', 'posts'] %}Manage{% elif active_page in ['accounts', 'usage', 'logs', 'settings'] %}Configure{% else %}Action Clip Bot{% endif %}</span>
         <span class="crumb-sep" aria-hidden="true">/</span>
         <span class="crumb-page">{% block crumb %}Dashboard{% endblock %}</span>
       </nav>

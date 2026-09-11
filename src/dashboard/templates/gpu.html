@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Default Gpu — Action Clip Bot{% endblock %}
+{% block crumb %}Default Gpu{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Default Gpu</h1>
+    <p class="muted page-sub">Which cloud GPU runs the model. The pipeline follows this selection.</p>
+  </div>
+</div>
+
+{% if saved %}
+<div class="alert alert-success" role="status">GPU backend saved — the next run uses it.</div>
+{% endif %}
+{% if error %}
+<div class="alert alert-error" role="alert"><strong>Error:</strong> {{ error }}</div>
+{% endif %}
+
+<div class="card" style="margin-bottom: 16px;">
+  <form method="post" action="/gpu/save" id="gpu-form">
+    <div class="provider-grid" role="radiogroup" aria-label="GPU backend">
+      <div class="provider-card-wrap">
+        <button type="button" class="provider-card {% if gpu.backend == 'runpod' %}selected{% endif %}" data-backend="runpod" aria-pressed="{% if gpu.backend == 'runpod' %}true{% else %}false{% endif %}">
+          <span class="provider-name" style="font-weight: 500; font-size: 0.95rem; color: var(--text);">RunPod</span>
+          <span class="provider-desc" style="font-size: 0.8rem; color: var(--text-muted);">Fully automated — pod starts, bootstraps and stops itself.</span>
+        </button>
+        <span class="field-hint">{% if gpu.runpod_key and gpu.runpod_pod %}API key + pod set{% else %}RUNPOD_API_KEY / RUNPOD_POD_ID missing in .env{% endif %}</span>
+      </div>
+      <div class="provider-card-wrap">
+        <button type="button" class="provider-card {% if gpu.backend == 'colab' %}selected{% endif %}" data-backend="colab" aria-pressed="{% if gpu.backend == 'colab' %}true{% else %}false{% endif %}">
+          <span class="provider-name" style="font-weight: 500; font-size: 0.95rem; color: var(--text);">Colab</span>
+          <span class="provider-desc" style="font-size: 0.8rem; color: var(--text-muted);">Manual — run the notebook, paste its tunnel URL below.</span>
+        </button>
+        <span class="field-hint"><a href="/colab-code">Open Colab Code →</a></span>
+      </div>
+    </div>
+    <input type="hidden" name="backend" id="gpu-backend" value="{{ gpu.backend }}">
+
+    <div class="form-row" id="colab-url-row">
+      <label for="colab_url">Colab tunnel URL
+        <input type="text" id="colab_url" name="colab_url" value="{{ gpu.colab_url }}" placeholder="https://….trycloudflare.com" autocomplete="off" style="font-family: monospace;">
+        <span class="field-hint">Only used when the Colab backend is selected. COLAB_TUNNEL_URL env var wins{% if gpu.colab_env %} (currently set){% endif %}.</span>
+      </label>
+    </div>
+
+    <div style="display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap; margin-top: 0.5rem;">
+      <button type="submit" class="btn btn-primary" id="gpu-save-btn">Save backend</button>
+      <button type="button" class="btn btn-secondary" id="gpu-test-btn">Test connection</button>
+      <span class="field-hint" id="gpu-test-result" aria-live="polite"></span>
+    </div>
+  </form>
+</div>
+
+<script>
+  const backendInput = document.getElementById('gpu-backend');
+  document.querySelectorAll('.provider-card[data-backend]').forEach((card) => {
+    card.addEventListener('click', () => {
+      document.querySelectorAll('.provider-card[data-backend]').forEach((c) => {
+        c.classList.remove('selected');
+        c.setAttribute('aria-pressed', 'false');
+      });
+      card.classList.add('selected');
+      card.setAttribute('aria-pressed', 'true');
+      backendInput.value = card.dataset.backend;
+    });
+  });
+  document.getElementById('gpu-form').addEventListener('submit', () => {
+    const btn = document.getElementById('gpu-save-btn');
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+  });
+  document.getElementById('gpu-test-btn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const out = document.getElementById('gpu-test-result');
+    btn.disabled = true;
+    out.textContent = 'Testing…';
+    try {
+      const res = await fetch('/api/gpu/test', { method: 'POST' });
+      const data = await res.json();
+      out.textContent = data.message;
+      toast(data.message, data.ok ? 'success' : 'error');
+    } catch (err) {
+      out.textContent = 'Test failed: ' + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+</script>
+{% endblock %}

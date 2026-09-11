@@ -5,6 +5,7 @@
 
 order:
   - local
+  - colab
 
 providers:
   local:
@@ -14,6 +15,16 @@ providers:
     watermark_free: true
     aspect: "16:9"
     env_key: LOCAL_GENERATOR_URL
+    credits:
+      kind: daily
+      cap: 1000000
+  colab:
+    enabled: true
+    free: true
+    model: "wan2.2-14b"
+    watermark_free: true
+    aspect: "16:9"
+    env_key: COLAB_TUNNEL_URL
     credits:
       kind: daily
       cap: 1000000

@@ -101,7 +101,14 @@ class Pipeline:
 
         Safe to call multiple times — RunPod returns 200 even if the pod is
         already stopped, so the finally-block safety net won't double-bill.
+        Skipped entirely when the Colab backend is selected (nothing to stop).
         """
+        try:
+            from src.generators.colab import selected_backend
+            if selected_backend() == "colab":
+                return
+        except ImportError:
+            pass
         runpod_key = self.settings.env("RUNPOD_API_KEY")
         runpod_id = self.settings.env("RUNPOD_POD_ID")
         if runpod_key and runpod_id:

@@ -36,6 +36,13 @@ class LocalGenerator(VideoGenerator):
     @property
     def is_configured(self) -> bool:
         import os
+        # Colab mode uses the separate ColabGenerator ("colab" provider), so
+        # this RunPod provider always steps out of the chain there — even if
+        # RunPod keys are still present in .env. RunPod behaviour otherwise
+        # unchanged.
+        from src.generators.colab import selected_backend
+        if selected_backend() == "colab":
+            return False
         has_runpod = bool(os.environ.get("RUNPOD_API_KEY") and os.environ.get("RUNPOD_POD_ID"))
         return bool(self.env_value) or has_runpod
 

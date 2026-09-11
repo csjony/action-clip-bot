@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Colab Code — Action Clip Bot{% endblock %}
+{% block crumb %}Colab Code{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Colab Code</h1>
+    <p class="muted page-sub">Run these cells top-to-bottom in Colab, then paste the tunnel URL on the <a href="/gpu">Default Gpu</a> page.</p>
+  </div>
+  <div class="page-actions">
+    <a href="/colab-code/download" class="btn btn-sm btn-secondary">Download .ipynb</a>
+    <button type="button" class="btn btn-sm" id="copy-all-btn">Copy all code</button>
+  </div>
+</div>
+
+{% if error %}
+<div class="alert alert-error" role="alert"><strong>Error:</strong> {{ error }}</div>
+{% endif %}
+
+<div class="nb-cells">
+{% for c in cells %}
+  {% if c.kind == "markdown" %}
+  <div class="card nb-md">{{ c.html | safe }}</div>
+  {% else %}
+  <div class="card nb-cell">
+    <div class="nb-cell-head">
+      <span class="muted">Cell {{ c.n }} · code</span>
+      <button type="button" class="btn btn-sm btn-secondary nb-copy" data-cell="{{ c.n }}">Copy</button>
+    </div>
+    <pre class="mono-area nb-src" id="nb-src-{{ c.n }}">{{ c.source }}</pre>
+  </div>
+  {% endif %}
+{% endfor %}
+</div>
+
+<script>
+  document.querySelectorAll('.nb-copy').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const pre = document.getElementById('nb-src-' + btn.dataset.cell);
+      const ok = await copyText(pre.textContent, null);
+      btn.textContent = ok ? 'Copied!' : 'Select manually';
+      toast(ok ? 'Cell copied.' : 'Copy failed — select manually.', ok ? 'success' : 'error');
+      setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+    });
+  });
+  document.getElementById('copy-all-btn').addEventListener('click', async (e) => {
+    const all = Array.from(document.querySelectorAll('.nb-src')).map((p) => p.textContent).join('\n\n# ── next cell ──\n\n');
+    const ok = await copyText(all, null);
+    toast(ok ? 'All code cells copied.' : 'Copy failed — select manually.', ok ? 'success' : 'error');
+  });
+</script>
+{% endblock %}
