@@ -188,7 +188,15 @@ pipe = None
 device = "cuda" if torch.cuda.is_available() else "cpu"
 _model_loaded = False
 _model_loading = False
-_is_wan22 = False
+# Live load progress surfaced via /ready (503 detail), /health and /progress
+# so dashboards show "downloading weights 42%" instead of a bare error.
+_load_progress: dict = {"phase": "starting", "pct": 0.0, "detail": ""}
+
+
+def _set_phase(phase: str, pct: float = 0.0, detail: str = "") -> None:
+    _load_progress["phase"] = phase
+    _load_progress["pct"] = pct
+    _load_progress["detail"] = detail_is_wan22 = False
 _is_hopper_or_newer = False
 _te_device = "cpu"
 _use_cpu_offload = False
@@ -282,21 +290,79 @@ def load_model():
         model_id = os.environ.get("WAN_MODEL_ID", "Wan-AI/Wan2.2-T2V-A14B-Diffusers")
         _is_wan22 = "wan2.2" in model_id.lower()
         print(f"Loading {model_id} (is_wan22={_is_wan22})...")
+
+        # ── Model profile: VRAM floor depends on parameter count ──────────
+        # 14B-class needs a datacenter GPU; 5B fits 24 GB cards; the 1.3B
+        # model is the Colab-free-tier (T4 15 GB) option — lower fidelity,
+        # but it runs. Override the floor with WAN_MIN_VRAM_GIB.
+        _lower = model_id.lower()
+        if "14b" in _lower or "t2v-a14b" in _lower:
+            _min_vram = float(os.environ.get("WAN_MIN_VRAM_GIB", "20"))
+            _profile = "14B"
+        elif "5b" in _lower or "ti2v-5b" in _lower:
+            _min_vram = float(os.environ.get("WAN_MIN_VRAM_GIB", "14"))
+            _profile = "5B"
+        else:
+            _min_vram = float(os.environ.get("WAN_MIN_VRAM_GIB", "8"))
+            _profile = "small (<=1.3B)"
+
+        # ── VRAM preflight (fail fast with a clear message, don't OOM mid-load)
+        # Refusing BEFORE the multi-GB download beats an OOM-kill with no
+        # actionable error. Override with WAN_ALLOW_SMALL_GPU=1 to attempt
+        # anyway, or point WAN_MODEL_ID at a smaller model.
+        if torch.cuda.is_available():
+            _vram_gib = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            _allow_small = os.environ.get("WAN_ALLOW_SMALL_GPU", "").lower() in ("1", "true", "yes")
+            print(f"Preflight: GPU VRAM {_vram_gib:.1f} GiB, profile {_profile}, needs >={_min_vram:.0f} GiB.")
+            if _vram_gib < _min_vram and not _allow_small:
+                raise RuntimeError(
+                    f"GPU has only {_vram_gib:.1f} GiB VRAM but {model_id} "
+                    f"({_profile} profile) needs >={_min_vram:.0f} GiB — loading "
+                    f"would OOM. Use a bigger GPU, a smaller WAN_MODEL_ID "
+                    f"(e.g. Wan-AI/Wan2.1-T2V-1.3B-Diffusers for free Colab), "
+                    f"or set WAN_ALLOW_SMALL_GPU=1 to attempt anyway (likely to crash).")
+            print("✅ VRAM preflight passed.")
+        else:
+            print("⚠️  No CUDA GPU detected — model load will fail. Attach a GPU runtime.")
         
         # Download the COMPLETE model weights — both transformer (high-noise expert) and
         # transformer_2 (low-noise refinement expert). Both are required for monetization-grade
         # quality. Previously we skipped transformer_2 due to 75 GB disk limit; the volume
         # is now 150 GB which gives ample headroom for both experts (~60 GB total).
+        # Progress is tracked via a tqdm subclass so /ready can report live %.
         if _is_wan22:
             try:
                 from huggingface_hub import snapshot_download
+                import inspect as _inspect
+
+                from tqdm import tqdm as _tqdm_base
+
+                class _ProgressTqdm(_tqdm_base):
+                    def update(self, n=1):
+                        super().update(n)
+                        try:
+                            total = self.total or 0
+                            _load_progress["downloaded"] = self.n
+                            _load_progress["total"] = total
+                            _load_progress["pct"] = round(100 * self.n / total, 1) if total else 0.0
+                            _load_progress["detail"] = str(self.desc or "")
+                        except Exception:
+                            pass
+
                 print("Checking/downloading complete Wan 2.2 model weights (both experts)...")
-                model_path = snapshot_download(repo_id=model_id)
+                _set_phase("downloading", 0.0, model_id)
+                _tqdm_kw = {"tqdm_class": _ProgressTqdm} if (
+                    "tqdm_class" in _inspect.signature(snapshot_download).parameters) else {}
+                model_path = snapshot_download(repo_id=model_id, **_tqdm_kw)
+                _set_phase("downloaded", 100.0, model_id)
                 print(f"Model path resolved locally: {model_path}")
             except Exception as e:
                 print(f"snapshot_download failed: {e}. Falling back to default loader.")
                 model_path = model_id
         else:
+            # Smaller models (e.g. Wan 2.1 1.3B for Colab T4) stream through
+            # diffusers' cached loader; per-file % still shows in stdout.
+            _set_phase("downloading", 0.0, model_id)
             model_path = model_id
 
         _debug_info["text_encoder_status"] = "loading"
@@ -423,6 +489,7 @@ def load_model():
         pipe = WanPipeline.from_pretrained(model_path, **pipe_kwargs)
         _debug_info["pipe_load_status"] = "success"
         print("✅ WanPipeline loaded on CPU.")
+        _set_phase("loading weights", 0.0, model_id)
 
         # Detect GPU compute capability to decide FP8 execution path
         if torch.cuda.is_available():
@@ -669,6 +736,7 @@ def load_model():
 
         _model_loaded = True
         _debug_info["status"] = "success"
+        _set_phase("ready", 100.0, model_id)
         print("✅ Model loaded successfully! Ready to generate videos.")
     except Exception as exc:
         _model_loading = False
@@ -842,7 +910,29 @@ def _run_generation_job(
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model_loaded": _model_loaded}
+    return {"status": "ok", "model_loaded": _model_loaded,
+            "load_progress": dict(_load_progress)}
+
+
+def _progress_text() -> str:
+    """Human-readable load status, e.g. 'downloading MODEL (42%)'."""
+    phase = _load_progress.get("phase", "loading")
+    pct = _load_progress.get("pct", 0.0)
+    detail = _load_progress.get("detail", "")
+    if phase == "downloading" and pct:
+        name = detail.split("/")[-1] if detail else "weights"
+        return f"downloading {name} ({pct}%)"
+    if detail:
+        return f"{phase}: {detail}"
+    return phase
+
+
+@app.get("/progress")
+def progress():
+    """Live model-load progress for dashboards (phase, %, current file)."""
+    return {"status": "loading" if not _model_loaded else "ready",
+            "device": device, "progress": dict(_load_progress),
+            "text": _progress_text()}
 
 
 @app.get("/ready")
@@ -861,7 +951,8 @@ def ready():
             threading.Thread(target=load_model, daemon=True).start()
         raise HTTPException(
             status_code=503,
-            detail="Model is still loading in the background."
+            detail=f"Model {_progress_text()} in the background. "
+                   "Poll /progress for live download %."
         )
     return {"status": "ready", "device": device}
 

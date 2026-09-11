@@ -154,6 +154,10 @@ PROVIDER_INFO: dict[str, dict] = {
         "url": "https://www.runpod.io/",
         "desc": "Local / RunPod Cloud GPU Wan 2.2 API URL (e.g. http://localhost:8000 or proxy.runpod.net link)",
     },
+    "colab": {
+        "url": "https://colab.research.google.com/",
+        "desc": "Colab tunnel URL from the notebook (https://….trycloudflare.com) — used when GPU backend is colab",
+    },
     # ── Content & music helper APIs ─────────────────────────────────────────
     "gemini": {
         "url": "https://aistudio.google.com/app/apikey",
@@ -909,6 +913,225 @@ async def settings_reset(request: Request):
         store.delete_override(k)
     get_settings.cache_clear()
     return RedirectResponse(url="/settings?saved=1", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# GPU backend (Default Gpu menu) + Colab Code menu
+# ---------------------------------------------------------------------------
+def _gpu_view_model() -> dict:
+    """Current backend selection + connection facts for the Default Gpu page."""
+    from src.config import _load_yaml
+    raw = _load_yaml("settings.yaml")
+
+    def file_default(key, fallback):
+        node = raw
+        for part in key.split("."):
+            if isinstance(node, dict) and part in node:
+                node = node[part]
+            else:
+                return fallback
+        return node
+
+    settings = get_settings()
+    try:
+        overridden = {r["key"] for r in store.list_overrides()}
+    except Exception:
+        overridden = set()
+    backend = str(settings.get("gpu.backend", "runpod"))
+    colab_url = str(settings.get("gpu.colab_url", "") or "")
+    return {
+        "backend": backend,
+        "backend_default": file_default("gpu.backend", "runpod"),
+        "backend_custom": "gpu.backend" in overridden,
+        "colab_url": colab_url,
+        "colab_url_default": file_default("gpu.colab_url", ""),
+        "colab_url_custom": "gpu.colab_url" in overridden,
+        "colab_env": bool(os.environ.get("COLAB_TUNNEL_URL")),
+        "runpod_key": bool(os.environ.get("RUNPOD_API_KEY")),
+        "runpod_pod": bool(os.environ.get("RUNPOD_POD_ID")),
+    }
+
+
+@app.get("/gpu", response_class=HTMLResponse)
+async def gpu_page(request: Request, saved: int = Query(default=0),
+                   error: str = Query(default="")):
+    return templates.TemplateResponse(request, "gpu.html", {
+        **_base_context(request, "gpu"),
+        "gpu": _gpu_view_model(),
+        "saved": saved,
+        "error": error or None,
+    })
+
+
+@app.post("/gpu/save", response_class=HTMLResponse)
+async def gpu_save(request: Request):
+    import json as _json
+    from src.config import _load_yaml
+    form = await request.form()
+    backend = str(form.get("backend", "")).strip().lower()
+    colab_url = str(form.get("colab_url", "")).strip().rstrip("/")
+    if backend not in ("runpod", "colab"):
+        return RedirectResponse(url="/gpu?error=Pick+runpod+or+colab.", status_code=303)
+    if backend == "colab" and colab_url and not colab_url.startswith("http"):
+        return RedirectResponse(url="/gpu?error=Tunnel+URL+must+start+with+http.", status_code=303)
+    raw = _load_yaml("settings.yaml")
+    if colab_url == raw.get("gpu", {}).get("colab_url", ""):
+        store.delete_override("gpu.colab_url")
+    else:
+        store.set_override("gpu.colab_url", _json.dumps(colab_url))
+    if backend == raw.get("gpu", {}).get("backend", "runpod"):
+        store.delete_override("gpu.backend")
+    else:
+        store.set_override("gpu.backend", _json.dumps(backend))
+    get_settings.cache_clear()
+    return RedirectResponse(url="/gpu?saved=1", status_code=303)
+
+
+@app.post("/api/gpu/test", response_class=JSONResponse)
+async def gpu_test():
+    """Live connection check for the selected backend (short timeouts)."""
+    import time as _time
+    import httpx
+    vm = _gpu_view_model()
+    t0 = _time.monotonic()
+    if vm["backend"] == "colab":
+        if not vm["colab_url"]:
+            return {"ok": False, "message": "No tunnel URL set. Run the notebook and paste it above."}
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                r = client.get(f"{vm['colab_url']}/ready")
+            ms = int((_time.monotonic() - t0) * 1000)
+            if r.status_code == 200:
+                return {"ok": True, "message": f"Colab server is ready ({ms}ms)."}
+            if r.status_code == 503:
+                try:
+                    detail = r.json().get("detail", "")
+                except Exception:
+                    detail = ""
+                return {"ok": False,
+                        "message": f"Model still loading: {detail or 'warming up'}."}
+            return {"ok": False, "message": f"Tunnel answered HTTP {r.status_code}: {r.text[:200]}"}
+        except Exception as exc:
+            return {"ok": False, "message": f"Unreachable: {exc}. Is the notebook + tunnel running?"}
+    # runpod: report API + pod state (no pod start here)
+    if not (vm["runpod_key"] and vm["runpod_pod"]):
+        return {"ok": False, "message": "RUNPOD_API_KEY / RUNPOD_POD_ID missing in .env."}
+    try:
+        from src.generators.runpod_manager import RunPodManager
+        status = RunPodManager(
+            os.environ["RUNPOD_API_KEY"], os.environ["RUNPOD_POD_ID"]).get_status()
+        ms = int((_time.monotonic() - t0) * 1000)
+        if status == "RUNNING":
+            return {"ok": True, "message": f"Pod is RUNNING ({ms}ms). Bootstrapping happens at run start."}
+        return {"ok": False, "message": f"Pod status: {status}. It will auto-start on the next run."}
+    except Exception as exc:
+        return {"ok": False, "message": f"RunPod API error: {exc}"}
+
+
+def _render_nb_markdown(src: str) -> str:
+    """Tiny markdown renderer for exactly what our notebook uses.
+
+    Supports: # / ## headings, **bold**, `code`, ``` fences, - lists,
+    > quotes, [text](url) links. Everything else is escaped plain text.
+    """
+    import html as _html
+    import re as _re
+
+    lines = src.split("\n")
+    out: list[str] = []
+    in_fence = False
+    in_list = False
+
+    def close_list():
+        nonlocal in_list
+        if in_list:
+            out.append("</ul>")
+            in_list = False
+
+    for line in lines:
+        if line.strip().startswith("```"):
+            close_list()
+            out.append("<pre class='nb-code'>" if not in_fence else "</pre>")
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            out.append(_html.escape(line))
+            continue
+        s = line.strip()
+        if not s:
+            close_list()
+            continue
+        if s.startswith("## "):
+            close_list()
+            out.append(f"<h4>{_html.escape(s[3:])}</h4>")
+            continue
+        if s.startswith("# "):
+            close_list()
+            out.append(f"<h3>{_html.escape(s[2:])}</h3>")
+            continue
+        if s.startswith("- "):
+            if not in_list:
+                out.append("<ul class='nb-list'>")
+                in_list = True
+            item = _html.escape(s[2:])
+            item = _re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", item)
+            item = _re.sub(r"`(.+?)`", r"<code>\1</code>", item)
+            out.append(f"<li>{item}</li>")
+            continue
+        close_list()
+        if s.startswith("> "):
+            s = s[2:]
+        esc = _html.escape(s)
+        esc = _re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", esc)
+        esc = _re.sub(r"`(.+?)`", r"<code>\1</code>", esc)
+        esc = _re.sub(r"\[(.+?)\]\((.+?)\)", r"<a href='\2' target='_blank' rel='noopener'>\1</a>", esc)
+        out.append(f"<p>{esc}</p>")
+    close_list()
+    if in_fence:
+        out.append("</pre>")
+    return "\n".join(out)
+
+
+def _load_notebook_cells() -> list[dict]:
+    """Parse colab/ActionClipBot_Colab.ipynb into render-ready cells."""
+    import json as _json
+    from src.config import PROJECT_ROOT
+    nb = _json.loads((PROJECT_ROOT / "colab" / "ActionClipBot_Colab.ipynb").read_text())
+    cells = []
+    for i, c in enumerate(nb.get("cells", [])):
+        src = "".join(c.get("source", []))
+        kind = c.get("cell_type", "code")
+        cells.append({
+            "n": i + 1,
+            "kind": kind,
+            "source": src,
+            "html": _render_nb_markdown(src) if kind == "markdown" else "",
+        })
+    return cells
+
+
+@app.get("/colab-code", response_class=HTMLResponse)
+async def colab_code_page(request: Request):
+    try:
+        cells = _load_notebook_cells()
+        error = None
+    except Exception as exc:
+        cells, error = [], f"Could not load notebook: {exc}"
+    return templates.TemplateResponse(request, "colab_code.html", {
+        **_base_context(request, "colab"),
+        "cells": cells,
+        "error": error,
+    })
+
+
+@app.get("/colab-code/download", include_in_schema=False)
+async def colab_code_download():
+    from fastapi.responses import FileResponse
+    from src.config import PROJECT_ROOT
+    path = PROJECT_ROOT / "colab" / "ActionClipBot_Colab.ipynb"
+    if not path.exists():
+        raise HTTPException(404, "Notebook not found")
+    return FileResponse(path, filename="ActionClipBot_Colab.ipynb")
 
 
 # ---------------------------------------------------------------------------
