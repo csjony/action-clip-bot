@@ -389,44 +389,46 @@ def load_model():
         else:
             print("⚠️  No CUDA GPU detected — model load will fail. Attach a GPU runtime.")
         
-        # Download the COMPLETE model weights — both transformer (high-noise expert) and
-        # transformer_2 (low-noise refinement expert). Both are required for monetization-grade
-        # quality. Previously we skipped transformer_2 due to 75 GB disk limit; the volume
-        # is now 150 GB which gives ample headroom for both experts (~60 GB total).
+        # Download weights up-front so /progress can report a live %.
+        # Wan 2.2 needs the COMPLETE model (both transformer experts); smaller
+        # models stream through the same snapshot call so their shards report
+        # progress too (previously they downloaded silently inside
+        # from_pretrained, stuck on "downloading 0%" until READY).
         # Progress is tracked via a tqdm subclass so /ready can report live %.
-        if _is_wan22:
-            try:
-                from huggingface_hub import snapshot_download
-                import inspect as _inspect
+        try:
+            from huggingface_hub import snapshot_download
+            import inspect as _inspect
 
-                from tqdm import tqdm as _tqdm_base
+            from tqdm import tqdm as _tqdm_base
 
-                class _ProgressTqdm(_tqdm_base):
-                    def update(self, n=1):
-                        super().update(n)
-                        try:
-                            total = self.total or 0
-                            _load_progress["downloaded"] = self.n
-                            _load_progress["total"] = total
-                            _load_progress["pct"] = round(100 * self.n / total, 1) if total else 0.0
-                            _load_progress["detail"] = str(self.desc or "")
-                        except Exception:
-                            pass
+            class _ProgressTqdm(_tqdm_base):
+                def update(self, n=1):
+                    super().update(n)
+                    try:
+                        total = self.total or 0
+                        _load_progress["downloaded"] = self.n
+                        _load_progress["total"] = total
+                        _load_progress["pct"] = round(100 * self.n / total, 1) if total else 0.0
+                        _load_progress["detail"] = str(self.desc or "")
+                    except Exception:
+                        pass
 
+            if _is_wan22:
                 print("Checking/downloading complete Wan 2.2 model weights (both experts)...")
-                _set_phase("downloading", 0.0, model_id)
-                _tqdm_kw = {"tqdm_class": _ProgressTqdm} if (
-                    "tqdm_class" in _inspect.signature(snapshot_download).parameters) else {}
-                model_path = snapshot_download(repo_id=model_id, **_tqdm_kw)
-                _set_phase("downloaded", 100.0, model_id)
-                print(f"Model path resolved locally: {model_path}")
-            except Exception as e:
-                print(f"snapshot_download failed: {e}. Falling back to default loader.")
-                model_path = model_id
-        else:
-            # Smaller models (e.g. Wan 2.1 1.3B for Colab T4) stream through
-            # diffusers' cached loader; per-file % still shows in stdout.
+            else:
+                print(f"Checking/downloading {model_id} weights (with live progress)...")
             _set_phase("downloading", 0.0, model_id)
+            _tqdm_kw = {"tqdm_class": _ProgressTqdm} if (
+                "tqdm_class" in _inspect.signature(snapshot_download).parameters) else {}
+            # Local paths skip the Hub call entirely.
+            if os.path.isdir(model_id):
+                model_path = model_id
+            else:
+                model_path = snapshot_download(repo_id=model_id, **_tqdm_kw)
+            _set_phase("downloaded", 100.0, model_id)
+            print(f"Model path resolved locally: {model_path}")
+        except Exception as e:
+            print(f"snapshot_download failed: {e}. Falling back to default loader.")
             model_path = model_id
 
         _debug_info["text_encoder_status"] = "loading"
@@ -540,6 +542,7 @@ def load_model():
 
         pipe_dtype = torch.bfloat16 if _is_wan22 else torch.float16
         print(f"Loading WanPipeline on CPU (dtype={pipe_dtype})...")
+        _set_phase("loading weights", 0.0, model_id)
         pipe_kwargs = {
             "text_encoder": None,
             "torch_dtype": pipe_dtype,
@@ -553,7 +556,7 @@ def load_model():
         pipe = WanPipeline.from_pretrained(model_path, **pipe_kwargs)
         _debug_info["pipe_load_status"] = "success"
         print("✅ WanPipeline loaded on CPU.")
-        _set_phase("loading weights", 0.0, model_id)
+        _set_phase("moving to GPU", 0.0, model_id)
 
         # Detect GPU compute capability to decide FP8 execution path
         if torch.cuda.is_available():
