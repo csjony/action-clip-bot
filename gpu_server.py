@@ -1094,10 +1094,15 @@ if __name__ == "__main__":
     # settings.yaml runpod.proxy_port without code edits.
     _host = os.environ.get("GPU_HOST", "0.0.0.0")
     _port = int(os.environ.get("GPU_PORT", "8000"))
-    print(f"Starting GPU server on {_host}:{_port}...")
+    # GPU_WS=none serves plain HTTP without the websockets protocol: on
+    # Colab, a websockets version clash raises inside the server thread where
+    # nothing prints it, and the only symptom is a dead port. Default "auto"
+    # keeps every other deployment exactly as before.
+    _ws = os.environ.get("GPU_WS", "auto")
+    print(f"Starting GPU server on {_host}:{_port} (ws={_ws})...")
     import threading
     server_thread = threading.Thread(
-        target=lambda: uvicorn.run(app, host=_host, port=_port, log_level="info"),
+        target=lambda: uvicorn.run(app, host=_host, port=_port, log_level="info", ws=_ws),
         daemon=True
     )
     server_thread.start()
