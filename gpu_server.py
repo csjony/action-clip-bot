@@ -65,9 +65,27 @@ def setup_environment():
         # which is created by `venv` before packages are installed (causing empty-venv re-exec).
         sentinel = os.path.join(venv_path, ".deps_installed")
         if not os.path.exists(venv_python) or not os.path.exists(sentinel):
+            # A stale venv without a working pip (interrupted creation, or a
+            # system python whose venv ships without pip — seen on Colab as
+            # "/root/venv/bin/python: No module named pip") poisons every
+            # step below. Detect and rebuild instead of crashing.
+            if os.path.exists(venv_python):
+                try:
+                    subprocess.run([venv_python, "-m", "pip", "--version"],
+                                   capture_output=True, check=True)
+                except Exception:
+                    print("Stale venv without working pip — removing and recreating...")
+                    import shutil
+                    shutil.rmtree(venv_path, ignore_errors=True)
             if not os.path.exists(venv_python):
                 print("Creating virtual environment on local disk at /root/venv...")
                 subprocess.run([sys.executable, "-m", "venv", "--system-site-packages", venv_path], check=True)
+                try:
+                    subprocess.run([venv_python, "-m", "pip", "--version"],
+                                   capture_output=True, check=True)
+                except Exception:
+                    print("Fresh venv has no pip — bootstrapping via ensurepip...")
+                    subprocess.run([venv_python, "-m", "ensurepip", "--upgrade"], check=True)
             print("Upgrading pip...")
             subprocess.run([venv_python, "-m", "pip", "install", "--upgrade", "pip", "-q"], check=True)
             print("Installing dependencies (this takes ~3 min on first boot)...")
