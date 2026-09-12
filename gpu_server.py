@@ -34,7 +34,53 @@ _debug_info = {
     "versions": {}
 }
 
+def _system_deps_ok() -> bool:
+    """True when the current interpreter can run the server as-is.
+
+    Checks every module imported at server top level. Transformers must be
+    4.x — 5.x broke the bitsandbytes layer-wise dequantization the FP8
+    fallback relies on (hence the 4.57.6 pin elsewhere).
+    """
+    try:
+        import torch  # noqa: F401
+        import diffusers  # noqa: F401
+        import transformers  # noqa: F401
+        import accelerate  # noqa: F401
+        import bitsandbytes  # noqa: F401
+        import fastapi  # noqa: F401
+        import uvicorn  # noqa: F401
+        import nest_asyncio  # noqa: F401
+        if not transformers.__version__.split(".")[0] == "4":
+            print(f"System transformers {transformers.__version__} is not 4.x — using venv path.")
+            return False
+        return True
+    except ImportError as exc:
+        print(f"System python missing {exc} — using venv path.")
+        return False
+
+
 def setup_environment():
+    # 0. If the SYSTEM interpreter already satisfies every runtime import,
+    # use it directly — no venv, no pip, no re-exec. This is the normal
+    # Colab case (the notebook cell installs into system python), and it
+    # also sidesteps systems whose python cannot build venvs at all
+    # (missing ensurepip → "No module named pip" death spiral).
+    if _system_deps_ok():
+        print("System python already has all dependencies — skipping venv (fast path).")
+        import diffusers, transformers, accelerate, bitsandbytes
+        print(f"System versions:\n"
+              f"  diffusers: {diffusers.__version__}\n"
+              f"  transformers: {transformers.__version__}\n"
+              f"  accelerate: {accelerate.__version__}\n"
+              f"  bitsandbytes: {bitsandbytes.__version__}")
+        _debug_info["versions"] = {
+            "diffusers": diffusers.__version__,
+            "transformers": transformers.__version__,
+            "accelerate": accelerate.__version__,
+            "bitsandbytes": bitsandbytes.__version__
+        }
+        return
+
     # 1. If running from our pre-built Docker image, all deps are already installed —
     # skip the slow pip install.
     if os.environ.get("DEPS_PREINSTALLED") == "1":
