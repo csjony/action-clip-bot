@@ -231,6 +231,17 @@ music:
   min_duration_sec: 30      # never pick tracks shorter than this
   min_synth_sec: 120        # synthetic-fallback track floor
 
+# --- Self-hosted Foley (free MMAudio V2A on the GPU server) ---------------------------
+# provider "foley" watches each rendered clip and synthesizes synchronized
+# sound. NOTE: MMAudio is CC-BY-NC-4.0 (non-commercial) — monetized channels
+# should prefer licensed SFX (freesound/elevenlabs) or commercial V2A.
+foley:
+  variant: "small_16k"      # MMAudio checkpoint (small fits T4)
+  steps: 25                 # diffusion steps per clip
+  cfg_strength: 4.5         # prompt adherence
+  timeout_sec: 900          # per-clip ceiling (T4 needs minutes)
+  mp3_quality: 2            # ffmpeg -q:a for caching (0=best)
+
 # --- SFX APIs -------------------------------------------------------------------------
 sfx_api:
   elevenlabs_url: "https://api.elevenlabs.io/v1/sound-effects"
@@ -246,6 +257,7 @@ sfx_api:
   replicate_version: "62871fb59889b2d7c13777f08deb3b36bdff88f7e1d53a50ad7694548a41b484"  # pinned MMAudio V2A
   replicate_wait_sec: 90    # max wait for Replicate prediction
   replicate_poll_sec: 2
+  replicate_create_retries: 5  # retries on 429 throttle (Retry-After honored)
   mp3_quality: 2            # ffmpeg -q:a for MMAudio conversion (0=best)
 
 # --- LLM tuning --------------------------------------------------------------------------

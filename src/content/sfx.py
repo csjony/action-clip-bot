@@ -77,6 +77,8 @@ class SFXPicker:
                 success = self._fetch_freesound(query, duration_sec, cached_file)
             elif self.provider == "mmaudio" and self.replicate_api_key:
                 success = self._fetch_mmaudio(query, duration_sec, video_path, cached_file)
+            elif self.provider == "foley":
+                success = self._fetch_foley(query, duration_sec, video_path, cached_file)
             else:
                 log.warning("No API key or valid provider set for SFX: provider=%s", self.provider)
                 return None
@@ -175,6 +177,63 @@ class SFXPicker:
                 dest_path.unlink(missing_ok=True)
         return False
 
+    def _fetch_foley(self, query: str, duration_sec: int,
+                     video_path: Path | None, dest_path: Path) -> bool:
+        """Self-hosted Foley: the GPU server watches the actual clip and
+        synthesizes synchronized audio (free — no Replicate needed).
+
+        Requires the colab backend (tunnel URL) — on RunPod the server image
+        may not have the mmaudio package. Falls back to False (caller keeps
+        music-only) on any failure.
+        """
+        import httpx
+        import subprocess
+        from src.generators.colab import resolve_colab_url
+        foley_cfg = {}
+        try:
+            from src.config import get_settings
+            foley_cfg = get_settings().get("foley", {}) or {}
+        except Exception:
+            pass
+        base_url = resolve_colab_url()
+        if not base_url:
+            log.warning("Foley provider needs the colab backend tunnel URL — skipping SFX")
+            return False
+        if not video_path or not video_path.exists():
+            log.warning("No video clip available for Foley V2A")
+            return False
+        timeout = float(foley_cfg.get("timeout_sec", 900))
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                with open(video_path, "rb") as fh:
+                    resp = client.post(
+                        f"{base_url}/foley",
+                        files={"video": (video_path.name, fh, "video/mp4")},
+                        data={
+                            "prompt": query,
+                            "duration": str(float(duration_sec)),
+                            "steps": str(int(foley_cfg.get("steps", 25))),
+                            "cfg_strength": str(float(foley_cfg.get("cfg_strength", 4.5))),
+                        },
+                    )
+            if resp.status_code != 200:
+                log.warning("Foley generation failed (status=%d): %s",
+                            resp.status_code, resp.text[:300])
+                return False
+            tmp_wav = dest_path.with_suffix(".tmp_foley.wav")
+            tmp_wav.write_bytes(resp.content)
+            cmd = ["ffmpeg", "-y", "-i", str(tmp_wav),
+                   "-c:a", "libmp3lame",
+                   "-q:a", str(foley_cfg.get("mp3_quality", 2)),
+                   "-vn", str(dest_path)]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            tmp_wav.unlink(missing_ok=True)
+            log.info("Self-hosted Foley synced audio cached: %s", dest_path)
+            return True
+        except Exception as e:
+            log.warning("Foley request failed: %s", e)
+            return False
+
     def _fetch_mmaudio(self, query: str, duration_sec: int, video_path: Path, dest_path: Path) -> bool:
         import httpx
         import time
@@ -209,17 +268,34 @@ class SFXPicker:
         try:
             wait_sec = int(cfg.get("replicate_wait_sec", 90))
             poll_sec = int(cfg.get("replicate_poll_sec", 2))
+            create_retries = int(cfg.get("replicate_create_retries", 5))
             with httpx.Client(timeout=float(cfg.get("replicate_timeout_sec", 30))) as client:
-                resp = client.post(
-                    "https://api.replicate.com/v1/predictions",
-                    headers=headers,
-                    json=payload
-                )
-                if resp.status_code != 201:
+                pred_data = None
+                for attempt in range(create_retries):
+                    resp = client.post(
+                        "https://api.replicate.com/v1/predictions",
+                        headers=headers,
+                        json=payload
+                    )
+                    if resp.status_code == 201:
+                        pred_data = resp.json()
+                        break
+                    if resp.status_code == 429 and attempt < create_retries - 1:
+                        # Throttled (free-tier bursts allowed are tiny) — honor
+                        # Retry-After, else exponential backoff, then retry.
+                        try:
+                            wait = int(resp.headers.get("retry-after", 2 ** attempt * 10))
+                        except (TypeError, ValueError):
+                            wait = 2 ** attempt * 10
+                        wait = max(5, min(wait, 120))
+                        log.warning("Replicate throttled (429) — waiting %ds (attempt %d/%d)...",
+                                    wait, attempt + 1, create_retries)
+                        time.sleep(wait)
+                        continue
                     log.warning("Replicate prediction creation failed: %d %s", resp.status_code, resp.text)
                     return False
-                
-                pred_data = resp.json()
+                if pred_data is None:
+                    return False
                 poll_url = pred_data.get("urls", {}).get("get")
                 if not poll_url:
                     log.warning("No poll URL in Replicate prediction response")

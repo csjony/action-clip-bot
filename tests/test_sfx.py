@@ -408,3 +408,79 @@ def test_editor_transition_fallback_single_clip(tmp_path, monkeypatch):
     assert "-filter_complex" not in concat_args
 
 
+
+
+class TestSelfHostedFoley:
+    """_fetch_foley posts the clip to the GPU /foley endpoint (no Replicate)."""
+
+    def test_posts_video_and_converts_to_mp3(self, tmp_path, monkeypatch):
+        import subprocess
+        import httpx as _httpx_mod
+
+        clip = tmp_path / "clip_0.mp4"
+        clip.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 100)
+        dest = tmp_path / "sfx_1.mp3"
+        posted = {}
+
+        class FakeResp:
+            status_code = 200
+            text = ""
+            content = b"RIFF....WAVEfake"
+
+        class FakeClient:
+            def __init__(self, *a, **k):
+                posted["timeout"] = k.get("timeout")
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def post(self, url, **kwargs):
+                posted["url"] = url
+                posted["data"] = kwargs.get("data")
+                files = kwargs.get("files") or {}
+                assert "video" in files
+                return FakeResp()
+
+        def fake_run(cmd, **kwargs):
+            assert cmd[0] == "ffmpeg"
+            Path(cmd[-1]).write_bytes(b"ID3fake-mp3")
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr("src.generators.colab.resolve_colab_url",
+                            lambda *a, **k: "https://tunnel.example")
+        monkeypatch.setattr(_httpx_mod, "Client", FakeClient)
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        picker = SFXPicker(provider="foley")
+        assert picker._fetch_foley("heavy rain", 5, clip, dest) is True
+        assert posted["url"] == "https://tunnel.example/foley"
+        assert posted["data"]["prompt"] == "heavy rain"
+        assert dest.exists()
+
+    def test_missing_tunnel_skips(self, tmp_path, monkeypatch):
+        clip = tmp_path / "clip_0.mp4"
+        clip.write_bytes(b"x")
+        monkeypatch.setattr("src.generators.colab.resolve_colab_url", lambda *a, **k: "")
+        picker = SFXPicker(provider="foley")
+        assert picker._fetch_foley("rain", 5, clip, tmp_path / "o.mp3") is False
+
+    def test_server_error_skips(self, tmp_path, monkeypatch):
+        import httpx as _httpx_mod
+        clip = tmp_path / "clip_0.mp4"
+        clip.write_bytes(b"x")
+
+        class FakeResp:
+            status_code = 500
+            text = "boom"
+
+        class FakeClient:
+            def __init__(self, *a, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def post(self, *a, **k): return FakeResp()
+
+        monkeypatch.setattr("src.generators.colab.resolve_colab_url",
+                            lambda *a, **k: "https://tunnel.example")
+        monkeypatch.setattr(_httpx_mod, "Client", FakeClient)
+        picker = SFXPicker(provider="foley")
+        assert picker._fetch_foley("rain", 5, clip, tmp_path / "o.mp3") is False

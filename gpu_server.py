@@ -192,7 +192,7 @@ setup_environment()
 
 import nest_asyncio
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 import torch
 from diffusers import WanPipeline
@@ -260,7 +260,10 @@ _load_progress: dict = {"phase": "starting", "pct": 0.0, "detail": ""}
 def _set_phase(phase: str, pct: float = 0.0, detail: str = "") -> None:
     _load_progress["phase"] = phase
     _load_progress["pct"] = pct
-    _load_progress["detail"] = detail_is_wan22 = False
+    _load_progress["detail"] = detail
+
+
+_is_wan22 = False
 _is_hopper_or_newer = False
 _te_device = "cpu"
 _use_cpu_offload = False
@@ -275,6 +278,99 @@ _jobs: dict = {}
 _generation_lock = threading.Lock()
 _uuid = uuid
 _threading = threading
+
+# ── Self-hosted Foley (MMAudio video-to-audio, free) ─────────────────────
+# Only ONE heavy model family lives on GPU at a time. /generate keeps the Wan
+# video pipe; /foley frees it and loads MMAudio small (≈3 GB weights,
+# T4-friendly), and the next /generate transparently switches back. Each
+# switch costs minutes of (re)load — so the pipeline renders ALL clips first
+# and runs Foley once in the audio phase. NOTE: MMAudio is CC-BY-NC-4.0
+# (non-commercial); monetized channels should prefer licensed SFX.
+_foley = None                # dict(net, feature_utils, model) when loaded
+_active_backend = "video"    # "video" | "foley"
+_foley_lock = threading.Lock()
+
+
+def _free_video_models() -> None:
+    """Drop the Wan pipe so Foley fits in VRAM. Next /generate reloads it."""
+    global pipe, _model_loaded, _model_loading, _active_backend
+    pipe = None
+    _model_loaded = False
+    _model_loading = False
+    _active_backend = "foley"
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    print("Video models freed — Foley backend active.")
+
+
+def _free_foley_models() -> None:
+    global _foley, _active_backend
+    _foley = None
+    _active_backend = "video"
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    print("Foley models freed — video backend active.")
+
+
+def _ensure_video() -> None:
+    """Switch back to Wan if Foley is resident; otherwise a no-op.
+
+    Called at the top of every video job. When the video pipe is already
+    loaded this costs nothing, so the normal (never-foley) path is unchanged.
+    """
+    global _active_backend
+    if _active_backend == "video" and pipe is not None and _model_loaded:
+        return
+    if _active_backend == "foley":
+        print("Switching video backend back on — freeing Foley, (re)loading Wan...")
+        _free_foley_models()
+    # load_model() is synchronous and skips itself when already loaded.
+    load_model()
+
+
+def _ensure_foley():
+    """Load MMAudio (frees the Wan pipe first). Raises RuntimeError if the
+    mmaudio package isn't installed on this server."""
+    global _foley, _active_backend
+    if _active_backend == "foley" and _foley is not None:
+        return _foley
+    t0 = time.time()
+    print("Switching to Foley backend — freeing video models first...")
+    _free_video_models()
+    # Lazy imports: RunPod images without the mmaudio package must still
+    # import this module cleanly; only /foley needs it.
+    try:
+        from mmaudio.eval_utils import ModelConfig, all_model_cfg
+        from mmaudio.model.networks import MMAudio, get_my_mmaudio
+        from mmaudio.model.utils.features_utils import FeaturesUtils
+    except ImportError as exc:
+        raise RuntimeError(
+            "MMAudio package not installed on this GPU server. "
+            "Colab: add git+https://github.com/hkchengrex/MMAudio.git to pip install.") from exc
+    variant = os.environ.get("MMAUDIO_VARIANT", "small_16k")
+    if variant not in all_model_cfg:
+        raise RuntimeError(
+            f"Unknown MMAudio variant {variant!r}. Choices: {sorted(all_model_cfg)}")
+    model: ModelConfig = all_model_cfg[variant]
+    model.download_if_needed()
+    dev = device
+    dtype = torch.bfloat16
+    net: MMAudio = get_my_mmaudio(model.model_name).to(dev, dtype).eval()
+    net.load_weights(torch.load(model.model_path, map_location=dev, weights_only=True))
+    feature_utils = FeaturesUtils(tod_vae_ckpt=model.vae_path,
+                                  synchformer_ckpt=model.synchformer_ckpt,
+                                  enable_conditions=True,
+                                  mode=model.mode,
+                                  bigvgan_vocoder_ckpt=model.bigvgan_16k_path,
+                                  need_vae_encoder=False)
+    feature_utils = feature_utils.to(dev, dtype).eval()
+    _foley = {"net": net, "feature_utils": feature_utils, "model": model}
+    print(f"Foley backend ready ({variant}, took {time.time() - t0:.0f}s).")
+    return _foley
 
 app = FastAPI(title="Wan GPU Server")
 
@@ -830,6 +926,8 @@ def _run_generation_job(
     global pipe, _is_wan22, _te_device, _use_cpu_offload, total_vram_gib
     with _generation_lock:
         _jobs[job_id]["status"] = "running"
+        # If Foley ran last, switch the Wan pipe back on first (no-op otherwise).
+        _ensure_video()
         num_frames = max(1, int(duration * fps))
         print(f"[job {job_id[:8]}] Generating: '{prompt}' | {duration}s | {num_frames} frames @ {fps}fps")
         try:
@@ -1056,6 +1154,68 @@ def vram():
         result["text_encoder_param_gib"] = round(total_bytes / (1024**3), 3)
 
     return result
+
+
+@app.post("/foley")
+def make_foley(video: UploadFile = File(...), prompt: str = Form(""),
+               negative_prompt: str = Form(""),
+               duration: float = Form(6.0), steps: int = Form(25),
+               cfg_strength: float = Form(4.5), seed: int = Form(42)):
+    """Self-hosted video-to-audio Foley (free, no Replicate needed).
+
+    Upload a clip; the server switches the Foley model on (freeing the Wan
+    video pipe first so it fits on small GPUs), synthesizes audio synced to
+    the visuals, and returns a WAV file. Synchronous — generations take
+    ~1-3 min on a T4, well within tunnel timeouts.
+    """
+    import gc
+    import tempfile
+    import torchaudio
+    from mmaudio.eval_utils import generate, load_video
+    from mmaudio.model.flow_matching import FlowMatching
+    with _generation_lock:
+        foley = _ensure_foley()
+        net, fu, model = foley["net"], foley["feature_utils"], foley["model"]
+        duration = max(1.0, min(float(duration), 30.0))
+        steps = max(1, min(int(steps), 100))
+        tmpdir = tempfile.mkdtemp(prefix="foley_")
+        in_path = os.path.join(tmpdir, "clip.mp4")
+        with open(in_path, "wb") as fh:
+            fh.write(video.file.read())
+        print(f"[foley] {video.filename or 'clip'} ({duration:.1f}s, {steps} steps, "
+              f"prompt={prompt[:60]!r})")
+        try:
+            video_info = load_video(in_path, duration)
+            clip_frames = video_info.clip_frames.unsqueeze(0)
+            sync_frames = video_info.sync_frames.unsqueeze(0)
+            duration = video_info.duration_sec
+            rng = torch.Generator(device=device)
+            rng.manual_seed(int(seed))
+            fm = FlowMatching(min_sigma=0, inference_mode="euler", num_steps=steps)
+            seq_cfg = model.seq_cfg
+            seq_cfg.duration = duration
+            net.update_seq_lengths(seq_cfg.latent_seq_len, seq_cfg.clip_seq_len,
+                                   seq_cfg.sync_seq_len)
+            with torch.no_grad():
+                audios = generate(
+                    clip_frames, sync_frames, [prompt or "cinematic sound effects"],
+                    negative_text=[negative_prompt or ""],
+                    feature_utils=fu, net=net, fm=fm, rng=rng,
+                    cfg_strength=float(cfg_strength))
+            out_wav = os.path.join(tmpdir, "foley.wav")
+            torchaudio.save(out_wav, audios.float().cpu()[0], seq_cfg.sampling_rate)
+            actual = video_info.duration_sec
+            print(f"[foley] done! {actual:.1f}s audio -> {out_wav}")
+            return FileResponse(out_wav, media_type="audio/wav", filename="foley.wav")
+        except Exception as exc:
+            import traceback
+            tb = traceback.format_exc()
+            print(tb)
+            raise HTTPException(status_code=500, detail=f"Foley generation failed: {exc}")
+        finally:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
 
 @app.post("/generate")
