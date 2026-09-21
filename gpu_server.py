@@ -332,6 +332,19 @@ def _ensure_video() -> None:
     load_model()
 
 
+def _mem_report(tag: str) -> None:
+    """One-line RAM/VRAM snapshot for the log — the only witness on OOM kills."""
+    import gc
+    import resource
+    gc.collect()
+    ram_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**2
+    if torch.cuda.is_available():
+        free, total = torch.cuda.mem_get_info()
+        print(f"[mem:{tag}] RAM peak {ram_gib:.1f} GiB | VRAM free {free / 1024**3:.1f}/{total / 1024**3:.1f} GiB")
+    else:
+        print(f"[mem:{tag}] RAM peak {ram_gib:.1f} GiB")
+
+
 def _ensure_foley():
     """Load MMAudio (frees the Wan pipe first). Raises RuntimeError if the
     mmaudio package isn't installed on this server."""
@@ -341,6 +354,11 @@ def _ensure_foley():
     t0 = time.time()
     print("Switching to Foley backend — freeing video models first...")
     _free_video_models()
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    _mem_report("foley-start")
     # Lazy imports: RunPod images without the mmaudio package must still
     # import this module cleanly; only /foley needs it.
     try:
@@ -357,17 +375,25 @@ def _ensure_foley():
             f"Unknown MMAudio variant {variant!r}. Choices: {sorted(all_model_cfg)}")
     model: ModelConfig = all_model_cfg[variant]
     model.download_if_needed()
+    print(f"[foley] weights cached, loading {variant} stepwise (CPU first, then GPU)...")
+    # CPU-first: .to(cuda) transiently duplicates tensors, so never
+    # materialize big weights directly on GPU while freed video weights may
+    # still be settling in RAM (that overlap OOM-killed a T4 session).
+    net: MMAudio = get_my_mmaudio(model.model_name).to("cpu").eval()
+    net.load_weights(torch.load(model.model_path, map_location="cpu", weights_only=True))
+    _mem_report("foley-net-cpu")
     dev = device
     dtype = torch.bfloat16
-    net: MMAudio = get_my_mmaudio(model.model_name).to(dev, dtype).eval()
-    net.load_weights(torch.load(model.model_path, map_location=dev, weights_only=True))
     feature_utils = FeaturesUtils(tod_vae_ckpt=model.vae_path,
                                   synchformer_ckpt=model.synchformer_ckpt,
                                   enable_conditions=True,
                                   mode=model.mode,
                                   bigvgan_vocoder_ckpt=model.bigvgan_16k_path,
                                   need_vae_encoder=False)
+    _mem_report("foley-features-cpu")
+    net = net.to(dev, dtype).eval()
     feature_utils = feature_utils.to(dev, dtype).eval()
+    _mem_report("foley-on-gpu")
     _foley = {"net": net, "feature_utils": feature_utils, "model": model}
     print(f"Foley backend ready ({variant}, took {time.time() - t0:.0f}s).")
     return _foley
@@ -1249,10 +1275,17 @@ def start_generate(payload: dict):
         raise HTTPException(status_code=400, detail="Prompt is required")
 
     if not _model_loaded or pipe is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Model is not fully loaded yet. Please call /ready first.",
-        )
+        # Self-heal: a failed Foley switch (or any crash that dropped the
+        # pipe) leaves the server 503-ing forever. Kick a background reload
+        # instead — identical outcome on cold boot, recovery otherwise.
+        if _active_backend == "video" and not _model_loading:
+            import threading
+            threading.Thread(target=load_model, daemon=True).start()
+            detail = ("Video model was missing — reloading in the background. "
+                      "Retry this job in a few minutes.")
+        else:
+            detail = "Model is not fully loaded yet. Please call /ready first."
+        raise HTTPException(status_code=503, detail=detail)
 
     job_id = _uuid.uuid4().hex
     _jobs[job_id] = {
