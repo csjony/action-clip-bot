@@ -399,6 +399,8 @@ def _ensure_foley():
     _mem_report("foley-net-cpu")
     dev = device
     dtype = torch.bfloat16
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     feature_utils = FeaturesUtils(tod_vae_ckpt=model.vae_path,
                                   synchformer_ckpt=model.synchformer_ckpt,
                                   enable_conditions=True,
@@ -406,7 +408,10 @@ def _ensure_foley():
                                   bigvgan_vocoder_ckpt=model.bigvgan_16k_path,
                                   need_vae_encoder=False)
     _mem_report("foley-features-cpu")
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     net = net.to(dev, dtype).eval()
+    _mem_report("foley-net-gpu")
     feature_utils = feature_utils.to(dev, dtype).eval()
     _mem_report("foley-on-gpu")
     _foley = {"net": net, "feature_utils": feature_utils, "model": model}
