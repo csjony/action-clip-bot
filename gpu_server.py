@@ -399,6 +399,10 @@ def _ensure_foley():
     _mem_report("foley-net-cpu")
     dev = device
     dtype = torch.bfloat16
+    # GPU first, THEN build the (CPU/fp32) feature extractors: peak RAM stays
+    # sequential instead of holding net-weights + extractor-weights at once.
+    net = net.to(dev, dtype).eval()
+    _mem_report("foley-net-gpu")
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     feature_utils = FeaturesUtils(tod_vae_ckpt=model.vae_path,
@@ -410,8 +414,6 @@ def _ensure_foley():
     _mem_report("foley-features-cpu")
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    net = net.to(dev, dtype).eval()
-    _mem_report("foley-net-gpu")
     feature_utils = feature_utils.to(dev, dtype).eval()
     _mem_report("foley-on-gpu")
     _foley = {"net": net, "feature_utils": feature_utils, "model": model}
@@ -1220,7 +1222,18 @@ def make_foley(video: UploadFile = File(...), prompt: str = Form(""),
     from mmaudio.eval_utils import generate, load_video
     from mmaudio.model.flow_matching import FlowMatching
     with _generation_lock:
-        foley = _ensure_foley()
+        try:
+            foley = _ensure_foley()
+        except Exception:
+            # A failed switch must not strand the server 503-ing forever:
+            # reload the video pipe in the background so /generate recovers.
+            try:
+                _free_foley_models()
+                import threading
+                threading.Thread(target=load_model, daemon=True).start()
+            except Exception:
+                pass
+            raise
         net, fu, model = foley["net"], foley["feature_utils"], foley["model"]
         duration = max(1.0, min(float(duration), 30.0))
         steps = max(1, min(int(steps), 100))
