@@ -1296,6 +1296,31 @@ def get_job_result(job_id: str):
         raise HTTPException(status_code=500, detail="Video file missing on server")
     return FileResponse(video_path, media_type="video/mp4")
 
+
+@app.post("/shutdown")
+def shutdown_server():
+    """Release the GPU once the pipeline has everything it needs.
+
+    A free Colab session is a limited daily allowance — idling after a run
+    burns it for nothing. Refused (409) while a generation is in flight so
+    a stray call can never kill a live run. Outside Colab the release step
+    is skipped harmlessly (no google.colab module).
+    """
+    if not _generation_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="generation in progress")
+    try:
+        try:
+            from google.colab import runtime as _colab_runtime
+            _colab_runtime.unassign()
+            return {"ok": True, "released": True,
+                    "message": "Colab runtime released."}
+        except Exception as exc:
+            return {"ok": True, "released": False,
+                    "note": f"no Colab runtime to release ({exc})"}
+    finally:
+        _generation_lock.release()
+
+
 if __name__ == "__main__":
     # Connectivity is handled by RunPod's native HTTP proxy
     # (https://{pod_id}-8000.proxy.runpod.net) — no tunnels needed.

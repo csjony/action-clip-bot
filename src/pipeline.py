@@ -96,6 +96,31 @@ class Pipeline:
         self.quick_clip_sec = int(self.settings.get("quickrun.clip_sec", self._QUICK_TEST_CLIP_SEC))
 
     # ------------------------------------------------------------- pod control
+    def _release_colab_backend(self) -> bool:
+        """Tell a Colab server we're done so it can release the GPU.
+
+        Free Colab sessions are a limited daily allowance — an idling runtime
+        burns it for nothing. No-op unless the colab backend is selected, and
+        the server itself refuses while a job is in flight (409). Returns
+        True when the server confirmed release.
+        """
+        try:
+            from src.generators.colab import resolve_colab_url, selected_backend
+            if selected_backend() != "colab":
+                return False
+            url = resolve_colab_url()
+            if not url:
+                return False
+            import httpx
+            resp = httpx.post(f"{url}/shutdown", timeout=60.0)
+            ok = resp.status_code == 200 and resp.json().get("ok", False)
+            if ok:
+                log.info("Colab backend released the GPU.")
+            return bool(ok)
+        except Exception as exc:
+            log.warning("Colab release call failed (runtime stays up): %s", exc)
+            return False
+
     def _stop_runpod_if_configured(self) -> None:
         """Stop the RunPod GPU pod if RUNPOD_API_KEY and RUNPOD_POD_ID are set.
 
@@ -477,9 +502,12 @@ class Pipeline:
             rendered = self._compose(plan, clips, narration, captions, music, sfx_list, outro)
             urls = self._publish(plan, rendered)
             log.info("done — %s", self.run_dir)
+            released = self._release_colab_backend()
             self.events.emit(
                 KIND_RUN_FINISHED, post_id=self.post_id,
-                message=f"Pipeline finished — {plan.title}",
+                message=f"Pipeline finished — {plan.title}" + (
+                    " (Colab runtime released — restart the notebook for the next run)"
+                    if released else ""),
                 detail={"title": plan.title, "theme": plan.theme,
                          "dry_run": self.dry_run},
             )

@@ -182,3 +182,37 @@ class TestRunpodUntouchedInColabMode:
         raw = _load_yaml("settings.yaml")
         assert raw["gpu"]["backend"] == "runpod"
         assert "colab_url" in raw["gpu"]
+
+
+class TestColabRelease:
+    def test_noop_on_runpod(self, tmp_env, monkeypatch):
+        from src.pipeline import Pipeline
+        pipe = Pipeline(dry_run=True, theme="heist_getaway")
+        with patch("httpx.post") as mock_post:
+            assert pipe._release_colab_backend() is False
+            mock_post.assert_not_called()
+
+    def test_posts_shutdown_on_colab(self, tmp_env, monkeypatch):
+        import httpx as _httpx_mod
+        _set_gpu(tmp_env, **{"gpu.backend": "colab",
+                             "gpu.colab_url": "https://abc.trycloudflare.com"})
+        from src.pipeline import Pipeline
+        pipe = Pipeline(dry_run=True, theme="heist_getaway")
+
+        class FakeResp:
+            status_code = 200
+            def json(self):
+                return {"ok": True}
+
+        with patch.object(_httpx_mod, "post", return_value=FakeResp()) as mock_post:
+            assert pipe._release_colab_backend() is True
+            (url,), _ = mock_post.call_args
+            assert url == "https://abc.trycloudflare.com/shutdown"
+
+    def test_release_failure_is_quiet(self, tmp_env, monkeypatch):
+        _set_gpu(tmp_env, **{"gpu.backend": "colab",
+                             "gpu.colab_url": "https://abc.trycloudflare.com"})
+        from src.pipeline import Pipeline
+        pipe = Pipeline(dry_run=True, theme="heist_getaway")
+        with patch("httpx.post", side_effect=RuntimeError("down")):
+            assert pipe._release_colab_backend() is False
