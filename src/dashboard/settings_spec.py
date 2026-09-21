@@ -149,6 +149,7 @@ SPEC: list[dict] = [
         {"key": "foley.steps", "label": "Steps per clip", "type": "int", "default": 25, "min": 1, "max": 100},
         {"key": "foley.cfg_strength", "label": "Prompt adherence", "type": "float", "default": 4.5, "min": 1, "max": 10, "step": 0.5},
         {"key": "foley.timeout_sec", "label": "Per-clip timeout (s)", "type": "int", "default": 900, "min": 60, "max": 1800},
+        {"key": "foley.poll_sec", "label": "Job poll (s)", "type": "int", "default": 10, "min": 2, "max": 60},
     ]},
     {"group": "LLM tuning", "desc": "Scriptwriting creativity and quota retries.", "fields": [
         {"key": "llm.model.gemini", "label": "Gemini model", "type": "text", "default": "gemini-3.5-flash"},

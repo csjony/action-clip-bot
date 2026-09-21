@@ -411,76 +411,81 @@ def test_editor_transition_fallback_single_clip(tmp_path, monkeypatch):
 
 
 class TestSelfHostedFoley:
-    """_fetch_foley posts the clip to the GPU /foley endpoint (no Replicate)."""
+    """_fetch_foley uses the async job API (submit → poll → download)."""
 
-    def test_posts_video_and_converts_to_mp3(self, tmp_path, monkeypatch):
-        import subprocess
+    def _client(self, monkeypatch, status_seq, dl_bytes=b"RIFF....WAVEfake"):
         import httpx as _httpx_mod
 
-        clip = tmp_path / "clip_0.mp4"
-        clip.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 100)
-        dest = tmp_path / "sfx_1.mp3"
-        posted = {}
+        calls = {"n": 0}
 
         class FakeResp:
-            status_code = 200
-            text = ""
-            content = b"RIFF....WAVEfake"
-
-        class FakeClient:
-            def __init__(self, *a, **k):
-                posted["timeout"] = k.get("timeout")
-            def __enter__(self):
-                return self
-            def __exit__(self, *a):
-                return False
-            def post(self, url, **kwargs):
-                posted["url"] = url
-                posted["data"] = kwargs.get("data")
-                files = kwargs.get("files") or {}
-                assert "video" in files
-                return FakeResp()
-
-        def fake_run(cmd, **kwargs):
-            assert cmd[0] == "ffmpeg"
-            Path(cmd[-1]).write_bytes(b"ID3fake-mp3")
-            return MagicMock(returncode=0)
-
-        monkeypatch.setattr("src.generators.colab.resolve_colab_url",
-                            lambda *a, **k: "https://tunnel.example")
-        monkeypatch.setattr(_httpx_mod, "Client", FakeClient)
-        monkeypatch.setattr(subprocess, "run", fake_run)
-
-        picker = SFXPicker(provider="foley")
-        assert picker._fetch_foley("heavy rain", 5, clip, dest) is True
-        assert posted["url"] == "https://tunnel.example/foley"
-        assert posted["data"]["prompt"] == "heavy rain"
-        assert dest.exists()
-
-    def test_missing_tunnel_skips(self, tmp_path, monkeypatch):
-        clip = tmp_path / "clip_0.mp4"
-        clip.write_bytes(b"x")
-        monkeypatch.setattr("src.generators.colab.resolve_colab_url", lambda *a, **k: "")
-        picker = SFXPicker(provider="foley")
-        assert picker._fetch_foley("rain", 5, clip, tmp_path / "o.mp3") is False
-
-    def test_server_error_skips(self, tmp_path, monkeypatch):
-        import httpx as _httpx_mod
-        clip = tmp_path / "clip_0.mp4"
-        clip.write_bytes(b"x")
-
-        class FakeResp:
-            status_code = 500
-            text = "boom"
+            def __init__(self, status, json_data=None, content=b""):
+                self.status_code = status
+                self._json = json_data or {}
+                self.text = str(json_data)
+                self.content = content
+            def json(self):
+                return self._json
 
         class FakeClient:
             def __init__(self, *a, **k): pass
             def __enter__(self): return self
             def __exit__(self, *a): return False
-            def post(self, *a, **k): return FakeResp()
+            def post(self, url, **kwargs):
+                assert url.endswith("/foley")
+                assert "video" in (kwargs.get("files") or {})
+                return FakeResp(200, {"job_id": "job1", "status": "queued"})
+            def get(self, url, **kwargs):
+                if url.endswith("/foley-status/job1"):
+                    calls["n"] += 1
+                    item = status_seq[min(calls["n"] - 1, len(status_seq) - 1)]
+                    if isinstance(item, Exception):
+                        raise item
+                    return FakeResp(200, {"status": item})
+                if url.endswith("/foley-result/job1"):
+                    return FakeResp(200, content=dl_bytes)
+                return FakeResp(404)
 
+        monkeypatch.setattr(_httpx_mod, "Client", FakeClient)
+        import time as _time_mod
+        monkeypatch.setattr(_time_mod, "sleep", lambda s: None)
+        return calls
+
+    def _run(self, monkeypatch, tmp_path, status_seq):
+        import subprocess
+        clip = tmp_path / "clip_0.mp4"
+        clip.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 100)
+        dest = tmp_path / "sfx_1.mp3"
+        calls = self._client(monkeypatch, status_seq)
+
+        def fake_run(cmd, **kwargs):
+            assert cmd[0] == "ffmpeg"
+            Path(cmd[-1]).write_bytes(b"ID3fake-mp3")
+            from unittest.mock import MagicMock
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
         monkeypatch.setattr("src.generators.colab.resolve_colab_url",
                             lambda *a, **k: "https://tunnel.example")
-        monkeypatch.setattr(_httpx_mod, "Client", FakeClient)
+        picker = SFXPicker(provider="foley")
+        return picker, clip, dest, calls
+
+    def test_async_flow_posts_polls_downloads(self, tmp_path, monkeypatch):
+        picker, clip, dest, calls = self._run(
+            monkeypatch, tmp_path, ["running", "done"])
+        assert picker._fetch_foley("heavy rain", 5, clip, dest) is True
+        assert calls["n"] == 2
+        assert dest.exists()
+
+    def test_failed_job_skips(self, tmp_path, monkeypatch):
+        picker, clip, dest, _ = self._run(
+            monkeypatch, tmp_path, ["running", "failed"])
+        assert picker._fetch_foley("rain", 5, clip, dest) is False
+        assert not dest.exists()
+
+    def test_missing_tunnel_skips(self, tmp_path, monkeypatch):
+        clip = tmp_path / "clip_0.mp4"
+        clip.write_bytes(b"x")
+        monkeypatch.setattr("src.generators.colab.resolve_colab_url", lambda *a, **k: "")
         picker = SFXPicker(provider="foley")
         assert picker._fetch_foley("rain", 5, clip, tmp_path / "o.mp3") is False

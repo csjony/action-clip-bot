@@ -202,9 +202,12 @@ class SFXPicker:
         if not video_path or not video_path.exists():
             log.warning("No video clip available for Foley V2A")
             return False
-        timeout = float(foley_cfg.get("timeout_sec", 900))
+        import time
+        max_wait = float(foley_cfg.get("timeout_sec", 900))
+        poll_sec = int(foley_cfg.get("poll_sec", 10))
+        status_timeout = float(foley_cfg.get("status_timeout_sec", 30.0))
         try:
-            with httpx.Client(timeout=timeout) as client:
+            with httpx.Client(timeout=60.0) as client:
                 with open(video_path, "rb") as fh:
                     resp = client.post(
                         f"{base_url}/foley",
@@ -217,11 +220,62 @@ class SFXPicker:
                         },
                     )
             if resp.status_code != 200:
-                log.warning("Foley generation failed (status=%d): %s",
+                log.warning("Foley submit failed (status=%d): %s",
                             resp.status_code, resp.text[:300])
                 return False
-            tmp_wav = dest_path.with_suffix(".tmp_foley.wav")
-            tmp_wav.write_bytes(resp.content)
+            try:
+                job_id = resp.json().get("job_id")
+            except Exception:
+                log.warning("Foley submit non-JSON reply: %s", resp.text[:200])
+                return False
+            if not job_id:
+                log.warning("Foley server gave no job_id")
+                return False
+            log.info("Foley job %s queued — polling (first call includes model load)...",
+                     job_id[:8])
+            start = time.time()
+            with httpx.Client(timeout=status_timeout) as client:
+                while time.time() - start < max_wait:
+                    time.sleep(poll_sec)
+                    elapsed = int(time.time() - start)
+                    try:
+                        st = client.get(f"{base_url}/foley-status/{job_id}")
+                    except Exception as exc:
+                        log.warning("Foley poll failed (%ds): %s — retrying...",
+                                    elapsed, exc)
+                        continue
+                    if st.status_code == 502:
+                        log.warning("Foley poll 502 (%ds) — tunnel/server hiccup, retrying...",
+                                    elapsed)
+                        continue
+                    if st.status_code != 200:
+                        log.warning("Foley poll %d (%ds) — retrying...",
+                                    st.status_code, elapsed)
+                        continue
+                    try:
+                        data = st.json()
+                    except Exception:
+                        continue
+                    status = data.get("status", "unknown")
+                    log.info("Foley job %s: %s (%ds elapsed)",
+                             job_id[:8], status, elapsed)
+                    if status == "done":
+                        break
+                    if status == "failed":
+                        log.warning("Foley job failed: %s",
+                                    data.get("error", "unknown")[:300])
+                        return False
+                else:
+                    log.warning("Foley job %s timed out after %ds",
+                                job_id[:8], max_wait)
+                    return False
+                dl = client.get(f"{base_url}/foley-result/{job_id}")
+                if dl.status_code != 200:
+                    log.warning("Foley result fetch failed (status=%d)",
+                                dl.status_code)
+                    return False
+                tmp_wav = dest_path.with_suffix(".tmp_foley.wav")
+                tmp_wav.write_bytes(dl.content)
             cmd = ["ffmpeg", "-y", "-i", str(tmp_wav),
                    "-c:a", "libmp3lame",
                    "-q:a", str(foley_cfg.get("mp3_quality", 2)),

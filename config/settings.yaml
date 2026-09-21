@@ -240,6 +240,8 @@ foley:
   steps: 25                 # diffusion steps per clip
   cfg_strength: 4.5         # prompt adherence
   timeout_sec: 900          # per-clip ceiling (T4 needs minutes)
+  poll_sec: 10              # async job poll cadence (edge-timeout safe)
+  status_timeout_sec: 30.0  # per-poll HTTP timeout
   mp3_quality: 2            # ffmpeg -q:a for caching (0=best)
 
 # --- SFX APIs -------------------------------------------------------------------------
