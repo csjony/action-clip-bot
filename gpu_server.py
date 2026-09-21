@@ -379,8 +379,23 @@ def _ensure_foley():
     # CPU-first: .to(cuda) transiently duplicates tensors, so never
     # materialize big weights directly on GPU while freed video weights may
     # still be settling in RAM (that overlap OOM-killed a T4 session).
+    # mmap=True avoids a full RAM copy of the 3 GB pickle on top of it.
+    import gc as _gc
+    _gc.collect()
+    _gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    _mem_report("foley-freed")
     net: MMAudio = get_my_mmaudio(model.model_name).to("cpu").eval()
-    net.load_weights(torch.load(model.model_path, map_location="cpu", weights_only=True))
+    try:
+        _state = torch.load(model.model_path, map_location="cpu",
+                            weights_only=True, mmap=True)
+    except TypeError:
+        # Older torch without mmap support — plain load (higher RAM peak).
+        _state = torch.load(model.model_path, map_location="cpu", weights_only=True)
+    net.load_weights(_state)
+    del _state
     _mem_report("foley-net-cpu")
     dev = device
     dtype = torch.bfloat16
